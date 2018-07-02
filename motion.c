@@ -2208,8 +2208,20 @@ static void mlp_actions(struct context *cnt){
     int indx;
 
     /***** MOTION LOOP - ACTIONS AND EVENT CONTROL SECTION *****/
+    struct images *imgs = &cnt->imgs;
+    struct coord location = cnt->current_image->location;
+    double diffWidthPerc = ((double)location.width / (double)imgs->width) * 100;
+    double diffHeightPerc = ((double)location.height / (double)imgs->height) * 100;
+    
+    boolean isValidChanges = (cnt->conf.horz_changes_pcnt == 0 || diffWidthPerc < cnt->conf.horz_changes_pcnt)
+        && (cnt->conf.vert_changes_pcnt == 0 || diffHeightPerc < cnt->conf.vert_changes_pcnt);
+    
+    if(diffWidthPerc > 0 && diffHeightPerc > 0){
+        MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO, _("*** Changes *** diffWidthPerc: %f, diffHeightPerc: %f, HRZ: %d, VRT: %d, IS_OK: %d"),
+            diffWidthPerc, diffHeightPerc, cnt->conf.horz_changes_pcnt, cnt->conf.vert_changes_pcnt, isValidChanges);
+    }
 
-    if (cnt->current_image->diffs > cnt->threshold) {
+    if (isValidChanges && (cnt->current_image->diffs > cnt->threshold)) {
         /* flag this image, it have motion */
         cnt->current_image->flags |= IMAGE_MOTION;
         cnt->lightswitch_framecounter++; /* micro lightswitch */

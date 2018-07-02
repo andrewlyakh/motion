@@ -42,6 +42,8 @@ struct config conf_template = {
     .flip_axis =                       "none",
     .rotate_deg =                      0,
     .max_changes =                     DEF_CHANGES,
+    .horz_changes_pcnt =               0,
+    .vert_changes_pcnt =               0,
     .threshold_tune =                  0,
     .output_pictures =                 "on",
     .motion_img =                      0,
@@ -647,6 +649,26 @@ config_param config_params[] = {
     "# triggers motion detection (default: 1500)",
     0,
     CONF_OFFSET(max_changes),
+    copy_int,
+    print_int,
+    WEBUI_LEVEL_LIMITED
+    },
+    {
+    "horz_changes_pcnt",
+    "# Horz changes pcnt\n"
+    "# triggers motion detection (default: 0)",
+    0,
+    CONF_OFFSET(horz_changes_pcnt),
+    copy_int,
+    print_int,
+    WEBUI_LEVEL_LIMITED
+    },
+    {
+    "vert_changes_pcnt",
+    "# Horz changes pcnt\n"
+    "# triggers motion detection (default: 0)",
+    0,
+    CONF_OFFSET(vert_changes_pcnt),
     copy_int,
     print_int,
     WEBUI_LEVEL_LIMITED

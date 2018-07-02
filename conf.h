@@ -32,6 +32,8 @@ struct config {
     const char *flip_axis;
     int rotate_deg;
     int max_changes;
+    int horz_changes_pcnt;
+    int vert_changes_pcnt;
     int threshold_tune;
     const char *output_pictures;
     int ffmpeg_duplicate_frames;
