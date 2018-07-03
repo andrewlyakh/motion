@@ -2208,15 +2208,15 @@ static void mlp_actions(struct context *cnt){
     int indx;
 
     /***** MOTION LOOP - ACTIONS AND EVENT CONTROL SECTION *****/
-    boolean isValidChanges = (cnt->conf.horz_changes_pcnt == 0 || cnt->diffWidthPerc < cnt->conf.horz_changes_pcnt)
-        && (cnt->conf.vert_changes_pcnt == 0 || cnt->diffHeightPerc < cnt->conf.vert_changes_pcnt);
+    boolean isValidChanges = (cnt->conf.horz_changes_pcnt == 0 || (cnt->diffWidthPerc > 0 && cnt->diffWidthPerc < cnt->conf.horz_changes_pcnt))
+        && (cnt->conf.vert_changes_pcnt == 0 || (cnt->diffHeightPerc > 0 && cnt->diffHeightPerc < cnt->conf.vert_changes_pcnt));
+
     if(cnt->diffWidthPerc > 0 && cnt->diffHeightPerc > 0){
         // MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO, _("*** Changes *** diffWidthPerc: %f, diffHeightPerc: %f, HRZ: %d, VRT: %d, IS_OK: %d"),
         //    cnt->diffWidthPerc, cnt->diffHeightPerc, cnt->conf.horz_changes_pcnt, cnt->conf.vert_changes_pcnt, isValidChanges);
-        char tmp[64];
-        sprintf(tmp, "Changes Width: %d, Height: %d", (int)cnt->diffWidthPerc, (int)cnt->diffHeightPerc);
-        draw_text(cnt->current_image->image_norm, cnt->imgs.width, cnt->imgs.height,
-                  10, 10, tmp, cnt->text_scale);
+        char tmp[24];
+        sprintf(tmp, "Changes W: %d H: %d", (int)cnt->diffWidthPerc, (int)cnt->diffHeightPerc);
+        draw_text(cnt->current_image->image_norm, cnt->imgs.width, cnt->imgs.height, 4, 4, tmp, cnt->text_scale);
     }
 
     if (isValidChanges && (cnt->current_image->diffs > cnt->threshold)) {
