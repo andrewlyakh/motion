@@ -655,8 +655,8 @@ config_param config_params[] = {
     },
     {
     "horz_changes_pcnt",
-    "# Horz changes pcnt\n"
-    "# triggers motion detection (default: 0)",
+    "# Maximum percent of horizontal changes\n"
+    "# that trigger motion detection (default: 0)",
     0,
     CONF_OFFSET(horz_changes_pcnt),
     copy_int,
@@ -665,8 +665,8 @@ config_param config_params[] = {
     },
     {
     "vert_changes_pcnt",
-    "# Horz changes pcnt\n"
-    "# triggers motion detection (default: 0)",
+    "# Maximum percent of vertical changes\n"
+    "# that trigger motion detection (default: 0)",
     0,
     CONF_OFFSET(vert_changes_pcnt),
     copy_int,
