@@ -718,11 +718,11 @@ static int v4l2_pixfmt_set(struct context *cnt, struct video_dev *curdev, u32 pi
                 ,vid_source->dst_fmt.fmt.pix.width
                 ,vid_source->dst_fmt.fmt.pix.height);
 
-            if ((curdev->width % 8) || (curdev->width % 8)) {
-                MOTION_LOG(ERR, TYPE_VIDEO, SHOW_ERRNO
+            if ((curdev->width % 8) || (curdev->height % 8)) {
+                MOTION_LOG(ERR, TYPE_VIDEO, NO_ERRNO
                     ,_("Adjusted resolution not modulo 8."));
-                MOTION_LOG(ERR, TYPE_VIDEO, SHOW_ERRNO
-                    ,_("Specify different width/height in config file."));
+                MOTION_LOG(ERR, TYPE_VIDEO, NO_ERRNO
+                    ,_("Specify different palette or width/height in config file."));
                 return -1;
             }
             cnt->conf.width = curdev->width;
@@ -799,7 +799,7 @@ static int v4l2_pixfmt_select(struct context *cnt, struct video_dev *curdev) {
             free(palette_array);
             return 0;
         }
-        MOTION_LOG(NTC, TYPE_VIDEO, SHOW_ERRNO
+        MOTION_LOG(NTC, TYPE_VIDEO, NO_ERRNO
             ,_("Configuration palette index %d (%s) for %dx%d doesn't work.")
             , indx_palette, palette_array[indx_palette].fourcc
             ,cnt->conf.width, cnt->conf.height);
@@ -844,7 +844,7 @@ static int v4l2_pixfmt_select(struct context *cnt, struct video_dev *curdev) {
             free(palette_array);
             return 0;
         }
-        MOTION_LOG(ERR, TYPE_VIDEO, SHOW_ERRNO
+        MOTION_LOG(ERR, TYPE_VIDEO, NO_ERRNO
             ,_("Palette selection failed for format %s")
             , palette_array[indx_palette].fourcc);
     }
@@ -1068,9 +1068,10 @@ static int v4l2_capture(struct context *cnt, struct video_dev *curdev, unsigned 
             return 0;
 
         case V4L2_PIX_FMT_YUYV:
-            /*FALLTHROUGH*/
-        case V4L2_PIX_FMT_YUV422P:
             vid_yuv422to420p(map, the_buffer->ptr, width, height);
+            return 0;
+        case V4L2_PIX_FMT_YUV422P:
+            vid_yuv422pto420p(map, the_buffer->ptr, width, height);
             return 0;
 
         case V4L2_PIX_FMT_YUV420:
