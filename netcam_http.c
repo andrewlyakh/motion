@@ -1685,7 +1685,7 @@ int netcam_setup_mjpg(netcam_context_ptr netcam, struct url_t *url)
 /**
  * netcam_read_file_jpeg
  *
- *      This routine reads local image file. ( netcam_url file:///path/image.jpg )
+ *      This routine reads local image jpeg. ( netcam_url jpeg:///path/image.jpg )
  *      The current implementation is still a little experimental,
  *      and needs some additional code for error detection and
  *      recovery.

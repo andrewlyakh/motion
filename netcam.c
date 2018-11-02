@@ -110,6 +110,9 @@ void netcam_url_parse(struct url_t *parse_url, const char *text_url)
     if (!strncmp(text_url, "file", 4))
         re = "(file)://(((.*):(.*))@)?([/:])?(:([0-9]+))?($|(/[^*]*))";
 
+    if (!strncmp(text_url, "jpeg", 4))
+        re = "(jpeg)://(((.*):(.*))@)?([/:])?(:([0-9]+))?($|(/[^*]*))";
+
     if (!strncmp(text_url, "v4l2", 4))
         re = "(v4l2)://(((.*):(.*))@)?([/:])?(:([0-9]+))?($|(/[^*]*))";
 
@@ -639,7 +642,7 @@ int netcam_start(struct context *cnt){
     pthread_cond_init(&netcam->exiting, NULL);
 
     /* Initialize the average frame time to the user's value. */
-    netcam->av_frame_time = 1000000.0 / cnt->conf.frame_limit;
+    netcam->av_frame_time = 1000000.0 / cnt->conf.framerate;
 
     MOTION_LOG(NTC, TYPE_NETCAM, NO_ERRNO
         ,_("Network Camera starting for camera (%s)"), cnt->conf.camera_name);
@@ -735,14 +738,14 @@ int netcam_start(struct context *cnt){
     } else if ((url.service) && (!strcmp(url.service, "ftp"))) {
         MOTION_LOG(INF, TYPE_NETCAM, NO_ERRNO,_("now calling netcam_setup_ftp"));
         retval = netcam_setup_ftp(netcam, &url);
-    } else if ((url.service) && (!strcmp(url.service, "file"))) {
+    } else if ((url.service) && (!strcmp(url.service, "jpeg"))) {
         MOTION_LOG(INF, TYPE_NETCAM, NO_ERRNO,_("now calling netcam_setup_file()"));
         retval = netcam_setup_file(netcam, &url);
     } else if ((url.service) && (!strcmp(url.service, "mjpg"))) {
         retval = netcam_setup_mjpg(netcam, &url);
     } else {
         MOTION_LOG(CRT, TYPE_NETCAM, NO_ERRNO
-            ,_("Invalid netcam service '%s' - must be http, ftp, mjpg, mjpeg, v4l2 or file.")
+            ,_("Invalid netcam service '%s' - must be http, ftp, mjpg, mjpeg, v4l2 or jpeg.")
             , url.service);
         retval = -1;
     }

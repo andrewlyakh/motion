@@ -265,6 +265,7 @@ static void context_init(struct context *cnt)
     cnt->lastrate = 25;
 
     memcpy(&cnt->track, &track_template, sizeof(struct trackoptions));
+
     cnt->pipe = -1;
     cnt->mpipe = -1;
 
@@ -335,14 +336,12 @@ static void sig_handler(int signo)
         }
         break;
     case SIGUSR1:
-        /*
-         * Ouch! We have been hit from the outside! Someone wants us to
-         * make a movie!
-         */
+        /* Trigger the end of a event */
         if (cnt_list) {
             i = -1;
-            while (cnt_list[++i])
-                cnt_list[i]->makemovie = 1;
+            while (cnt_list[++i]){
+                cnt_list[i]->event_stop = TRUE;
+            }
         }
         break;
     case SIGHUP:
@@ -358,15 +357,16 @@ static void sig_handler(int signo)
         /*FALLTHROUGH*/
     case SIGTERM:
         /*
-         * Somebody wants us to quit! We should better finish the actual
+         * Somebody wants us to quit! We should finish the actual
          * movie and end up!
          */
+
         if (cnt_list) {
             i = -1;
             while (cnt_list[++i]) {
-                cnt_list[i]->makemovie = 1;
-                cnt_list[i]->finish = 1;
                 cnt_list[i]->webcontrol_finish = 1;
+                cnt_list[i]->event_stop = TRUE;
+                cnt_list[i]->finish = 1;
                 /*
                  * Don't restart thread when it ends,
                  * all threads restarts if global restart is set
@@ -552,7 +552,7 @@ static void motion_detected(struct context *cnt, int dev, struct image_data *img
     }
 
     /* Limit framerate */
-    if (img->shot < conf->frame_limit) {
+    if (img->shot < conf->framerate) {
         /*
          * If config option stream_motion is enabled, send the latest motion detected image
          * to the stream but only if it is not the first shot within a second. This is to
@@ -566,7 +566,7 @@ static void motion_detected(struct context *cnt, int dev, struct image_data *img
          * Save motion jpeg, if configured
          * Output the image_out (motion) picture.
          */
-        if (conf->motion_img)
+        if (conf->picture_output_motion)
             event(cnt, EVENT_IMAGEM_DETECTED, NULL, NULL, NULL, &img->timestamp_tv);
     }
 
@@ -607,7 +607,7 @@ static void process_image_ring(struct context *cnt, unsigned int max_images)
         /* Set inte global context that we are working with this image */
         cnt->current_image = &cnt->imgs.image_ring[cnt->imgs.image_ring_out];
 
-        if (cnt->imgs.image_ring[cnt->imgs.image_ring_out].shot < cnt->conf.frame_limit) {
+        if (cnt->imgs.image_ring[cnt->imgs.image_ring_out].shot < cnt->conf.framerate) {
             if (cnt->log_level >= DBG) {
                 char tmp[32];
                 const char *t;
@@ -644,10 +644,10 @@ static void process_image_ring(struct context *cnt, unsigned int max_images)
              * many duplicated frames, say 10 fps, 5 duplicated, the video will
              * look like it is frozen every second for half a second.
              */
-            if (!cnt->conf.ffmpeg_duplicate_frames) {
+            if (!cnt->conf.movie_duplicate_frames) {
                 /* don't duplicate frames */
             } else if ((cnt->imgs.image_ring[cnt->imgs.image_ring_out].shot == 0) &&
-                (cnt->ffmpeg_output || (cnt->conf.useextpipe && cnt->extpipe))) {
+                (cnt->ffmpeg_output || (cnt->conf.movie_extpipe_use && cnt->extpipe))) {
                 /*
                  * movie_last_shoot is -1 when file is created,
                  * we don't know how many frames there is in first sec
@@ -693,13 +693,13 @@ static void process_image_ring(struct context *cnt, unsigned int max_images)
 
         /* Store it as a preview image, only if it has motion */
         if (cnt->imgs.image_ring[cnt->imgs.image_ring_out].flags & IMAGE_MOTION) {
-            /* Check for most significant preview-shot when output_pictures=best */
+            /* Check for most significant preview-shot when picture_output=best */
             if (cnt->new_img & NEWIMG_BEST) {
                 if (cnt->imgs.image_ring[cnt->imgs.image_ring_out].diffs > cnt->imgs.preview_image.diffs) {
                     image_save_as_preview(cnt, &cnt->imgs.image_ring[cnt->imgs.image_ring_out]);
                 }
             }
-            /* Check for most significant preview-shot when output_pictures=center */
+            /* Check for most significant preview-shot when picture_output=center */
             if (cnt->new_img & NEWIMG_CENTER) {
                 if (cnt->imgs.image_ring[cnt->imgs.image_ring_out].cent_dist < cnt->imgs.preview_image.cent_dist) {
                     image_save_as_preview(cnt, &cnt->imgs.image_ring[cnt->imgs.image_ring_out]);
@@ -729,16 +729,17 @@ static int init_camera_type(struct context *cnt){
 
     cnt->camera_type = CAMERA_TYPE_UNKNOWN;
 
-#ifdef HAVE_MMAL
-    if (cnt->conf.mmalcam_name) {
-        cnt->camera_type = CAMERA_TYPE_MMAL;
-        return 0;
-    }
-#endif // HAVE_MMAL
+    #ifdef HAVE_MMAL
+        if (cnt->conf.mmalcam_name) {
+            cnt->camera_type = CAMERA_TYPE_MMAL;
+            return 0;
+        }
+    #endif // HAVE_MMAL
 
     if (cnt->conf.netcam_url) {
         if ((strncmp(cnt->conf.netcam_url,"mjpeg",5) == 0) ||
             (strncmp(cnt->conf.netcam_url,"v4l2" ,4) == 0) ||
+            (strncmp(cnt->conf.netcam_url,"file" ,4) == 0) ||
             (strncmp(cnt->conf.netcam_url,"rtmp" ,4) == 0) ||
             (strncmp(cnt->conf.netcam_url,"rtsp" ,4) == 0)) {
             cnt->camera_type = CAMERA_TYPE_RTSP;
@@ -748,19 +749,19 @@ static int init_camera_type(struct context *cnt){
         return 0;
     }
 
-#ifdef HAVE_BKTR
-    if (strncmp(cnt->conf.video_device,"/dev/bktr",9) == 0) {
-        cnt->camera_type = CAMERA_TYPE_BKTR;
-        return 0;
-    }
-#endif // HAVE_BKTR
+    #ifdef HAVE_BKTR
+        if (strncmp(cnt->conf.video_device,"/dev/bktr",9) == 0) {
+            cnt->camera_type = CAMERA_TYPE_BKTR;
+            return 0;
+        }
+    #endif // HAVE_BKTR
 
-#ifdef HAVE_V4L2
-    if (cnt->conf.video_device) {
-        cnt->camera_type = CAMERA_TYPE_V4L2;
-        return 0;
-    }
-#endif // HAVE_V4L2
+    #ifdef HAVE_V4L2
+        if (cnt->conf.video_device) {
+            cnt->camera_type = CAMERA_TYPE_V4L2;
+            return 0;
+        }
+    #endif // HAVE_V4L2
 
 
     MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
@@ -904,6 +905,286 @@ static void init_text_scale(struct context *cnt){
 
 }
 
+static void mot_stream_init(struct context *cnt){
+
+    /* The image buffers are allocated in event_stream_put if needed*/
+    pthread_mutex_init(&cnt->mutex_stream, NULL);
+
+    cnt->imgs.substream_image = NULL;
+
+    cnt->stream_norm.jpeg_size = 0;
+    cnt->stream_norm.jpeg_data = NULL;
+    cnt->stream_norm.cnct_count = 0;
+
+    cnt->stream_sub.jpeg_size = 0;
+    cnt->stream_sub.jpeg_data = NULL;
+    cnt->stream_sub.cnct_count = 0;
+
+    cnt->stream_motion.jpeg_size = 0;
+    cnt->stream_motion.jpeg_data = NULL;
+    cnt->stream_motion.cnct_count = 0;
+
+    cnt->stream_source.jpeg_size = 0;
+    cnt->stream_source.jpeg_data = NULL;
+    cnt->stream_source.cnct_count = 0;
+
+}
+
+static void mot_stream_deinit(struct context *cnt){
+
+    /* Need to check whether buffers were allocated since init
+     * function defers the allocations to event_stream_put
+    */
+
+    pthread_mutex_destroy(&cnt->mutex_stream);
+
+    if (cnt->imgs.substream_image != NULL){
+        free(cnt->imgs.substream_image);
+        cnt->imgs.substream_image = NULL;
+    }
+
+    if (cnt->stream_norm.jpeg_data != NULL){
+        free(cnt->stream_norm.jpeg_data);
+        cnt->stream_norm.jpeg_data = NULL;
+    }
+
+    if (cnt->stream_sub.jpeg_data != NULL){
+        free(cnt->stream_sub.jpeg_data);
+        cnt->stream_sub.jpeg_data = NULL;
+    }
+
+    if (cnt->stream_motion.jpeg_data != NULL){
+        free(cnt->stream_motion.jpeg_data);
+        cnt->stream_motion.jpeg_data = NULL;
+    }
+
+    if (cnt->stream_source.jpeg_data != NULL){
+        free(cnt->stream_source.jpeg_data);
+        cnt->stream_source.jpeg_data = NULL;
+    }
+}
+
+/* TODO: dbse functions are to be moved to separate module in future change*/
+static void dbse_global_deinit(void){
+    MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO, _("Closing MYSQL"));
+    #ifdef HAVE_MYSQL
+        mysql_library_end();
+    #endif /* HAVE_MYSQL */
+}
+
+static void dbse_global_init(void){
+
+    MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("Initializing database"));
+   /* Initialize all the database items */
+    #ifdef HAVE_MYSQL
+        if (mysql_library_init(0, NULL, NULL)) {
+            fprintf(stderr, "could not initialize MySQL library\n");
+            exit(1);
+        }
+    #endif /* HAVE_MYSQL */
+
+    #ifdef HAVE_SQLITE3
+        int indx;
+        /* database_sqlite3 == NULL if not changed causes each thread to create their own
+        * sqlite3 connection this will only happens when using a non-threaded sqlite version */
+        cnt_list[0]->database_sqlite3=NULL;
+        if (cnt_list[0]->conf.database_type && ((!strcmp(cnt_list[0]->conf.database_type, "sqlite3")) && cnt_list[0]->conf.database_dbname)) {
+            MOTION_LOG(NTC, TYPE_DB, NO_ERRNO
+                ,_("SQLite3 Database filename %s")
+                ,cnt_list[0]->conf.database_dbname);
+
+            int thread_safe = sqlite3_threadsafe();
+            if (thread_safe > 0) {
+                MOTION_LOG(NTC, TYPE_DB, NO_ERRNO, _("SQLite3 is threadsafe"));
+                MOTION_LOG(NTC, TYPE_DB, NO_ERRNO, _("SQLite3 serialized %s")
+                    ,(sqlite3_config(SQLITE_CONFIG_SERIALIZED)?_("FAILED"):_("SUCCESS")));
+                if (sqlite3_open( cnt_list[0]->conf.database_dbname, &cnt_list[0]->database_sqlite3) != SQLITE_OK) {
+                    MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
+                        ,_("Can't open database %s : %s")
+                        ,cnt_list[0]->conf.database_dbname
+                        ,sqlite3_errmsg( cnt_list[0]->database_sqlite3));
+                    sqlite3_close( cnt_list[0]->database_sqlite3);
+                    exit(1);
+                }
+                MOTION_LOG(NTC, TYPE_DB, NO_ERRNO,_("database_busy_timeout %d msec"),
+                        cnt_list[0]->conf.database_busy_timeout);
+                if (sqlite3_busy_timeout( cnt_list[0]->database_sqlite3,  cnt_list[0]->conf.database_busy_timeout) != SQLITE_OK)
+                    MOTION_LOG(ERR, TYPE_DB, NO_ERRNO,_("database_busy_timeout failed %s")
+                        ,sqlite3_errmsg( cnt_list[0]->database_sqlite3));
+            }
+        }
+        /* Cascade to all threads */
+        indx = 1;
+        while (cnt_list[indx] != NULL) {
+            cnt_list[indx]->database_sqlite3 = cnt_list[0]->database_sqlite3;
+            indx++;
+        }
+
+    #endif /* HAVE_SQLITE3 */
+
+}
+
+static int dbse_init_mysql(struct context *cnt){
+
+    #ifdef HAVE_MYSQL
+        if ((!strcmp(cnt->conf.database_type, "mysql")) && (cnt->conf.database_dbname)) {
+            // close database to be sure that we are not leaking
+            mysql_close(cnt->database);
+            cnt->database_event_id = 0;
+
+            cnt->database = mymalloc(sizeof(MYSQL));
+            mysql_init(cnt->database);
+
+            if (!mysql_real_connect(cnt->database, cnt->conf.database_host, cnt->conf.database_user,
+                cnt->conf.database_password, cnt->conf.database_dbname, 0, NULL, 0)) {
+                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
+                    ,_("Cannot connect to MySQL database %s on host %s with user %s")
+                    ,cnt->conf.database_dbname, cnt->conf.database_host
+                    ,cnt->conf.database_user);
+                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
+                    ,_("MySQL error was %s"), mysql_error(cnt->database));
+                return -2;
+            }
+            #if (defined(MYSQL_VERSION_ID)) && (MYSQL_VERSION_ID > 50012)
+                my_bool my_true = TRUE;
+                mysql_options(cnt->database, MYSQL_OPT_RECONNECT, &my_true);
+            #endif
+        }
+    #else
+        (void)cnt;  /* Avoid compiler warnings */
+    #endif /* HAVE_MYSQL */
+
+    return 0;
+
+}
+
+static int dbse_init_sqlite3(struct context *cnt){
+    #ifdef HAVE_SQLITE3
+        if (cnt_list[0]->database_sqlite3 != 0) {
+            MOTION_LOG(NTC, TYPE_DB, NO_ERRNO,_("SQLite3 using shared handle"));
+            cnt->database_sqlite3 = cnt_list[0]->database_sqlite3;
+
+        } else if ((!strcmp(cnt->conf.database_type, "sqlite3")) && cnt->conf.database_dbname) {
+            MOTION_LOG(NTC, TYPE_DB, NO_ERRNO
+                ,_("SQLite3 Database filename %s"), cnt->conf.database_dbname);
+            if (sqlite3_open(cnt->conf.database_dbname, &cnt->database_sqlite3) != SQLITE_OK) {
+                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
+                    ,_("Can't open database %s : %s")
+                    ,cnt->conf.database_dbname, sqlite3_errmsg(cnt->database_sqlite3));
+                sqlite3_close(cnt->database_sqlite3);
+                return -2;
+            }
+            MOTION_LOG(NTC, TYPE_DB, NO_ERRNO
+                ,_("database_busy_timeout %d msec"), cnt->conf.database_busy_timeout);
+            if (sqlite3_busy_timeout(cnt->database_sqlite3, cnt->conf.database_busy_timeout) != SQLITE_OK)
+                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
+                    ,_("database_busy_timeout failed %s")
+                    ,sqlite3_errmsg(cnt->database_sqlite3));
+        }
+    #else
+        (void)cnt;  /* Avoid compiler warnings */
+    #endif /* HAVE_SQLITE3 */
+
+    return 0;
+
+}
+
+static int dbse_init_pgsql(struct context *cnt){
+    #ifdef HAVE_PGSQL
+        if ((!strcmp(cnt->conf.database_type, "postgresql")) && (cnt->conf.database_dbname)) {
+            char connstring[255];
+
+            /*
+             * Create the connection string.
+             * Quote the values so we can have null values (blank)
+             */
+            snprintf(connstring, 255,
+                     "dbname='%s' host='%s' user='%s' password='%s' port='%d'",
+                      cnt->conf.database_dbname, /* dbname */
+                      (cnt->conf.database_host ? cnt->conf.database_host : ""), /* host (may be blank) */
+                      (cnt->conf.database_user ? cnt->conf.database_user : ""), /* user (may be blank) */
+                      (cnt->conf.database_password ? cnt->conf.database_password : ""), /* password (may be blank) */
+                      cnt->conf.database_port
+            );
+
+            cnt->database_pg = PQconnectdb(connstring);
+            if (PQstatus(cnt->database_pg) == CONNECTION_BAD) {
+                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
+                ,_("Connection to PostgreSQL database '%s' failed: %s")
+                ,cnt->conf.database_dbname, PQerrorMessage(cnt->database_pg));
+                return -2;
+            }
+        }
+    #else
+        (void)cnt;  /* Avoid compiler warnings */
+    #endif /* HAVE_PGSQL */
+
+    return 0;
+}
+
+static int dbse_init(struct context *cnt){
+    int retcd = 0;
+
+    if (cnt->conf.database_type) {
+        MOTION_LOG(NTC, TYPE_DB, NO_ERRNO
+            ,_("Database backend %s"), cnt->conf.database_type);
+
+        retcd = dbse_init_mysql(cnt);
+        if (retcd != 0) return retcd;
+
+        retcd = dbse_init_sqlite3(cnt);
+        if (retcd != 0) return retcd;
+
+        retcd = dbse_init_pgsql(cnt);
+        if (retcd != 0) return retcd;
+
+        /* Set the sql mask file according to the SQL config options*/
+        cnt->sql_mask = cnt->conf.sql_log_picture * (FTYPE_IMAGE + FTYPE_IMAGE_MOTION) +
+                        cnt->conf.sql_log_snapshot * FTYPE_IMAGE_SNAPSHOT +
+                        cnt->conf.sql_log_movie * (FTYPE_MPEG + FTYPE_MPEG_MOTION) +
+                        cnt->conf.sql_log_timelapse * FTYPE_MPEG_TIMELAPSE;
+    }
+
+    return retcd;
+}
+
+static void dbse_deinit(struct context *cnt){
+    if (cnt->conf.database_type) {
+        #ifdef HAVE_MYSQL
+            if ( (!strcmp(cnt->conf.database_type, "mysql")) && (cnt->conf.database_dbname)) {
+                mysql_close(cnt->database);
+                cnt->database_event_id = 0;
+            }
+        #endif /* HAVE_MYSQL */
+
+        #ifdef HAVE_PGSQL
+                if ((!strcmp(cnt->conf.database_type, "postgresql")) && (cnt->conf.database_dbname)) {
+                    PQfinish(cnt->database_pg);
+                }
+        #endif /* HAVE_PGSQL */
+
+        #ifdef HAVE_SQLITE3
+                /* Close the SQLite database */
+                if ((!strcmp(cnt->conf.database_type, "sqlite3")) && (cnt->conf.database_dbname)) {
+                    sqlite3_close(cnt->database_sqlite3);
+                    cnt->database_sqlite3 = NULL;
+                }
+        #endif /* HAVE_SQLITE3 */
+        (void)cnt;
+    }
+}
+
+static void dbse_sqlmask_update(struct context *cnt){
+    /*
+    * Set the sql mask file according to the SQL config options
+    * We update it for every frame in case the config was updated
+    * via remote control.
+    */
+    cnt->sql_mask = cnt->conf.sql_log_picture * (FTYPE_IMAGE + FTYPE_IMAGE_MOTION) +
+                    cnt->conf.sql_log_snapshot * FTYPE_IMAGE_SNAPSHOT +
+                    cnt->conf.sql_log_movie * (FTYPE_MPEG + FTYPE_MPEG_MOTION) +
+                    cnt->conf.sql_log_timelapse * FTYPE_MPEG_TIMELAPSE;
+}
 
 /**
  * motion_init
@@ -923,7 +1204,7 @@ static void init_text_scale(struct context *cnt){
 static int motion_init(struct context *cnt)
 {
     FILE *picture;
-    int indx;
+    int indx, retcd;
 
     util_threadname_set("ml",cnt->threadnr,cnt->conf.camera_name);
 
@@ -946,7 +1227,8 @@ static int motion_init(struct context *cnt)
     cnt->prev_event = 0;
     cnt->lightswitch_framecounter = 0;
     cnt->detecting_motion = 0;
-    cnt->makemovie = 0;
+    cnt->event_user = FALSE;
+    cnt->event_stop = FALSE;
 
     /* Make sure to default the high res to zero */
     cnt->imgs.width_high = 0;
@@ -955,17 +1237,17 @@ static int motion_init(struct context *cnt)
 
     MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
         ,_("Camera %d started: motion detection %s"),
-        cnt->conf.camera_id, cnt->pause ? _("Disabled"):_("Enabled"));
+        cnt->camera_id, cnt->pause ? _("Disabled"):_("Enabled"));
 
-    if (!cnt->conf.filepath)
-        cnt->conf.filepath = mystrdup(".");
+    if (!cnt->conf.target_dir)
+        cnt->conf.target_dir = mystrdup(".");
 
     if (init_camera_type(cnt) != 0 ) return -3;
 
     if ((cnt->camera_type != CAMERA_TYPE_RTSP) &&
-        (cnt->conf.ffmpeg_passthrough)) {
+        (cnt->conf.movie_passthrough)) {
         MOTION_LOG(WRN, TYPE_ALL, NO_ERRNO,_("Pass-through processing disabled."));
-        cnt->conf.ffmpeg_passthrough = 0;
+        cnt->conf.movie_passthrough = 0;
     }
 
     if ((cnt->conf.height == 0) || (cnt->conf.width == 0)) {
@@ -976,6 +1258,22 @@ static int motion_init(struct context *cnt)
         MOTION_LOG(WRN, TYPE_ALL, NO_ERRNO
             ,_("Using default dimensions %dx%d"),cnt->conf.height,cnt->conf.width);
     }
+    if (cnt->conf.width % 8) {
+        MOTION_LOG(CRT, TYPE_NETCAM, NO_ERRNO
+            ,_("Image width (%d) requested is not modulo 8."), cnt->conf.width);
+        cnt->conf.width = cnt->conf.width - (cnt->conf.width % 8) + 8;
+        MOTION_LOG(CRT, TYPE_NETCAM, NO_ERRNO
+            ,_("Adjusting width to next higher multiple of 8 (%d)."), cnt->conf.width);
+    }
+    if (cnt->conf.height % 8) {
+        MOTION_LOG(CRT, TYPE_NETCAM, NO_ERRNO
+            ,_("Image height (%d) requested is not modulo 8."), cnt->conf.height);
+        cnt->conf.height = cnt->conf.height - (cnt->conf.height % 8) + 8;
+        MOTION_LOG(CRT, TYPE_NETCAM, NO_ERRNO
+            ,_("Adjusting height to next higher multiple of 8 (%d)."), cnt->conf.height);
+    }
+    if (cnt->conf.width  < 64) cnt->conf.width  = 64;
+    if (cnt->conf.height < 64) cnt->conf.height = 64;
 
     /* set the device settings */
     cnt->video_dev = vid_start(cnt);
@@ -1001,6 +1299,21 @@ static int motion_init(struct context *cnt)
             ,_("Motion only supports width and height modulo 8"));
         return -3;
     }
+    /* Revalidate we got a valid image size */
+    if ((cnt->imgs.width % 8) || (cnt->imgs.height % 8)) {
+        MOTION_LOG(CRT, TYPE_NETCAM, NO_ERRNO
+            ,_("Image width (%d) or height(%d) requested is not modulo 8.")
+            ,cnt->imgs.width, cnt->imgs.height);
+        return -3;
+    }
+
+    if ((cnt->imgs.width  < 64) || (cnt->imgs.height < 64)){
+        MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
+            ,_("Motion only supports width and height greater than or equal to 64 %dx%d")
+            ,cnt->imgs.width, cnt->imgs.height);
+            return -3;
+    }
+
     /* We set size_high here so that it can be used in the retry function to determine whether
      * we need to break and reallocate buffers
      */
@@ -1021,24 +1334,25 @@ static int motion_init(struct context *cnt)
     cnt->imgs.labelsize = mymalloc((cnt->imgs.motionsize/2+1) * sizeof(*cnt->imgs.labelsize));
     cnt->imgs.preview_image.image_norm = mymalloc(cnt->imgs.size_norm);
     cnt->imgs.common_buffer = mymalloc(3 * cnt->imgs.width * cnt->imgs.height);
-
     if (cnt->imgs.size_high > 0){
         cnt->imgs.image_virgin.image_high = mymalloc(cnt->imgs.size_high);
         cnt->imgs.preview_image.image_high = mymalloc(cnt->imgs.size_high);
     }
 
+    mot_stream_init(cnt);
+
     /* Set output picture type */
     if (!strcmp(cnt->conf.picture_type, "ppm"))
         cnt->imgs.picture_type = IMAGE_TYPE_PPM;
     else if (!strcmp(cnt->conf.picture_type, "webp")) {
-#ifdef HAVE_WEBP
-        cnt->imgs.picture_type = IMAGE_TYPE_WEBP;
-#else
-        /* Fallback to jpeg if webp was selected in the config file, but the support for it was not compiled in */
-        MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
-        ,_("webp image format is not available, failing back to jpeg"));
-        cnt->imgs.picture_type = IMAGE_TYPE_JPEG;
-#endif /* HAVE_WEBP */
+        #ifdef HAVE_WEBP
+                cnt->imgs.picture_type = IMAGE_TYPE_WEBP;
+        #else
+                /* Fallback to jpeg if webp was selected in the config file, but the support for it was not compiled in */
+                MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
+                ,_("webp image format is not available, failing back to jpeg"));
+                cnt->imgs.picture_type = IMAGE_TYPE_JPEG;
+        #endif /* HAVE_WEBP */
     }
     else
         cnt->imgs.picture_type = IMAGE_TYPE_JPEG;
@@ -1077,129 +1391,39 @@ static int motion_init(struct context *cnt)
     /* create a reference frame */
     alg_update_reference_frame(cnt, RESET_REF_FRAME);
 
-#if defined(HAVE_V4L2) && !defined(__FreeBSD__)
-    /* open video loopback devices if enabled */
-    if (cnt->conf.vidpipe) {
-        MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
-            ,_("Opening video loopback device for normal pictures"));
+    #if defined(HAVE_V4L2) && !defined(__FreeBSD__)
+        /* open video loopback devices if enabled */
+        if (cnt->conf.video_pipe) {
+            MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
+                ,_("Opening video loopback device for normal pictures"));
 
-        /* vid_startpipe should get the output dimensions */
-        cnt->pipe = vlp_startpipe(cnt->conf.vidpipe, cnt->imgs.width, cnt->imgs.height);
+            /* vid_startpipe should get the output dimensions */
+            cnt->pipe = vlp_startpipe(cnt->conf.video_pipe, cnt->imgs.width, cnt->imgs.height);
 
-        if (cnt->pipe < 0) {
-            MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
-                ,_("Failed to open video loopback for normal pictures"));
-            return -1;
-        }
-    }
-
-    if (cnt->conf.motionvidpipe) {
-        MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
-            ,_("Opening video loopback device for motion pictures"));
-
-        /* vid_startpipe should get the output dimensions */
-        cnt->mpipe = vlp_startpipe(cnt->conf.motionvidpipe, cnt->imgs.width, cnt->imgs.height);
-
-        if (cnt->mpipe < 0) {
-            MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
-                ,_("Failed to open video loopback for motion pictures"));
-            return -1;
-        }
-    }
-#endif /* HAVE_V4L2 && !__FreeBSD__ */
-
-#if defined(HAVE_MYSQL) || defined(HAVE_PGSQL) || defined(HAVE_SQLITE3)
-    if (cnt->conf.database_type) {
-        MOTION_LOG(NTC, TYPE_DB, NO_ERRNO
-            ,_("Database backend %s"), cnt->conf.database_type);
-
-#ifdef HAVE_SQLITE3
-    /* if database_sqlite3 is NULL then we are using a non threaded version of
-     * sqlite3 and will need a seperate connection for each thread */
-    if (cnt->database_sqlite3) {
-        MOTION_LOG(NTC, TYPE_DB, NO_ERRNO,_("SQLite3 using shared handle"));
-    } else if ((!strcmp(cnt->conf.database_type, "sqlite3")) && cnt->conf.database_dbname) {
-        MOTION_LOG(NTC, TYPE_DB, NO_ERRNO
-            ,_("SQLite3 Database filename %s"), cnt->conf.database_dbname);
-        if (sqlite3_open(cnt->conf.database_dbname, &cnt->database_sqlite3) != SQLITE_OK) {
-            MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
-                ,_("Can't open database %s : %s")
-                ,cnt->conf.database_dbname, sqlite3_errmsg(cnt->database_sqlite3));
-            sqlite3_close(cnt->database_sqlite3);
-            exit(1);
-        }
-        MOTION_LOG(NTC, TYPE_DB, NO_ERRNO
-            ,_("database_busy_timeout %d msec"), cnt->conf.database_busy_timeout);
-        if (sqlite3_busy_timeout(cnt->database_sqlite3, cnt->conf.database_busy_timeout) != SQLITE_OK)
-            MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
-                ,_("database_busy_timeout failed %s")
-                ,sqlite3_errmsg(cnt->database_sqlite3));
-    }
-#endif /* HAVE_SQLITE3 */
-
-#ifdef HAVE_MYSQL
-        if ((!strcmp(cnt->conf.database_type, "mysql")) && (cnt->conf.database_dbname)) {
-            // close database to be sure that we are not leaking
-            mysql_close(cnt->database);
-            cnt->database_event_id = 0;
-
-            cnt->database = mymalloc(sizeof(MYSQL));
-            mysql_init(cnt->database);
-
-            if (!mysql_real_connect(cnt->database, cnt->conf.database_host, cnt->conf.database_user,
-                cnt->conf.database_password, cnt->conf.database_dbname, 0, NULL, 0)) {
-                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
-                    ,_("Cannot connect to MySQL database %s on host %s with user %s")
-                    ,cnt->conf.database_dbname, cnt->conf.database_host
-                    ,cnt->conf.database_user);
-                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
-                    ,_("MySQL error was %s"), mysql_error(cnt->database));
-                return -2;
-            }
-#if (defined(MYSQL_VERSION_ID)) && (MYSQL_VERSION_ID > 50012)
-            my_bool my_true = TRUE;
-            mysql_options(cnt->database, MYSQL_OPT_RECONNECT, &my_true);
-#endif
-        }
-#endif /* HAVE_MYSQL */
-
-#ifdef HAVE_PGSQL
-        if ((!strcmp(cnt->conf.database_type, "postgresql")) && (cnt->conf.database_dbname)) {
-            char connstring[255];
-
-            /*
-             * Create the connection string.
-             * Quote the values so we can have null values (blank)
-             */
-            snprintf(connstring, 255,
-                     "dbname='%s' host='%s' user='%s' password='%s' port='%d'",
-                      cnt->conf.database_dbname, /* dbname */
-                      (cnt->conf.database_host ? cnt->conf.database_host : ""), /* host (may be blank) */
-                      (cnt->conf.database_user ? cnt->conf.database_user : ""), /* user (may be blank) */
-                      (cnt->conf.database_password ? cnt->conf.database_password : ""), /* password (may be blank) */
-                      cnt->conf.database_port
-            );
-
-            cnt->database_pg = PQconnectdb(connstring);
-            if (PQstatus(cnt->database_pg) == CONNECTION_BAD) {
-                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
-                ,_("Connection to PostgreSQL database '%s' failed: %s")
-                ,cnt->conf.database_dbname, PQerrorMessage(cnt->database_pg));
-                return -2;
+            if (cnt->pipe < 0) {
+                MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
+                    ,_("Failed to open video loopback for normal pictures"));
+                return -1;
             }
         }
-#endif /* HAVE_PGSQL */
 
+        if (cnt->conf.video_pipe_motion) {
+            MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
+                ,_("Opening video loopback device for motion pictures"));
 
-        /* Set the sql mask file according to the SQL config options*/
+            /* vid_startpipe should get the output dimensions */
+            cnt->mpipe = vlp_startpipe(cnt->conf.video_pipe_motion, cnt->imgs.width, cnt->imgs.height);
 
-        cnt->sql_mask = cnt->conf.sql_log_image * (FTYPE_IMAGE + FTYPE_IMAGE_MOTION) +
-                        cnt->conf.sql_log_snapshot * FTYPE_IMAGE_SNAPSHOT +
-                        cnt->conf.sql_log_movie * (FTYPE_MPEG + FTYPE_MPEG_MOTION) +
-                        cnt->conf.sql_log_timelapse * FTYPE_MPEG_TIMELAPSE;
-    }
+            if (cnt->mpipe < 0) {
+                MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
+                    ,_("Failed to open video loopback for motion pictures"));
+                return -1;
+            }
+        }
+    #endif /* HAVE_V4L2 && !__FreeBSD__ */
 
-#endif /* defined(HAVE_MYSQL) || defined(HAVE_PGSQL) || defined(HAVE_SQLITE3) */
+    retcd = dbse_init(cnt);
+    if (retcd != 0) return retcd;
 
     /* Load the mask file if any */
     if (cnt->conf.mask_file) {
@@ -1242,63 +1466,51 @@ static int motion_init(struct context *cnt)
     memset(cnt->imgs.smartmask_buffer, 0, cnt->imgs.motionsize * sizeof(*cnt->imgs.smartmask_buffer));
 
     /* Set noise level */
-    cnt->noise = cnt->conf.noise;
+    cnt->noise = cnt->conf.noise_level;
 
     /* Set threshold value */
-    cnt->threshold = cnt->conf.max_changes;
-
-    /* Initialize stream server if stream port is specified to not 0 */
-    if (cnt->conf.stream_port) {
-        if (stream_init (&(cnt->stream), cnt->conf.stream_port, cnt->conf.stream_localhost,
-            cnt->conf.ipv6_enabled, cnt->conf.stream_cors_header) == -1) {
-            MOTION_LOG(ERR, TYPE_ALL, SHOW_ERRNO
-                ,_("Problem enabling motion-stream server in port %d")
-                ,cnt->conf.stream_port);
-            cnt->conf.stream_port = 0;
-            cnt->finish = 1;
-        } else {
-            MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
-                ,_("Started motion-stream server on port %d (auth %s)")
-                ,cnt->conf.stream_port
-                ,cnt->conf.stream_auth_method ? _("Enabled"):_("Disabled"));
-        }
+    cnt->threshold = cnt->conf.threshold;
+    if (cnt->conf.threshold_maximum > cnt->conf.threshold ){
+        cnt->threshold_maximum = cnt->conf.threshold_maximum;
+    } else {
+        cnt->threshold_maximum = (cnt->imgs.height * cnt->imgs.width * 3) / 2;
     }
 
-    /* Initialize 50% scaled substream server if substream port is specified to not 0
-       But only if dimensions are 8-modulo after scaling. Otherwise disable substream */
-    if (cnt->conf.substream_port){
-        if ((cnt->conf.width / 2) % 8 == 0  && (cnt->conf.height / 2) % 8 == 0){
-            if (stream_init (&(cnt->substream), cnt->conf.substream_port, cnt->conf.stream_localhost,
-                cnt->conf.ipv6_enabled, cnt->conf.stream_cors_header) == -1) {
+    if (cnt->conf.stream_preview_method == 99){
+        /* This is the depreciated Stop stream process */
+
+        /* Initialize stream server if stream port is specified to not 0 */
+
+        if (cnt->conf.stream_port) {
+            if (stream_init (&(cnt->stream), cnt->conf.stream_port, cnt->conf.stream_localhost,
+                cnt->conf.webcontrol_ipv6, cnt->conf.stream_cors_header) == -1) {
                 MOTION_LOG(ERR, TYPE_ALL, SHOW_ERRNO
-                    ,_("Problem enabling motion-substream server in port %d")
-                    ,cnt->conf.substream_port);
-                cnt->conf.substream_port = 0;
+                    ,_("Problem enabling motion-stream server in port %d")
+                    ,cnt->conf.stream_port);
+                cnt->conf.stream_port = 0;
                 cnt->finish = 1;
             } else {
                 MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
-                    ,_("Started motion-substream server on port %d (auth %s)")
-                    ,cnt->conf.substream_port
+                    ,_("Started motion-stream server on port %d (auth %s)")
+                    ,cnt->conf.stream_port
                     ,cnt->conf.stream_auth_method ? _("Enabled"):_("Disabled"));
             }
-        } else {
-            MOTION_LOG(WRN, TYPE_ALL, NO_ERRNO
-                ,_("Original resolution must be modulo of 16 for substream"));
-            cnt->conf.substream_port = 0;
         }
-    }
+
+    } /* End of legacy stream methods*/
+
 
     /* Prevent first few frames from triggering motion... */
     cnt->moved = 8;
 
     /* Work out expected frame rate based on config setting */
-    if (cnt->conf.frame_limit < 2)
-        cnt->conf.frame_limit = 2;
+    if (cnt->conf.framerate < 2)
+        cnt->conf.framerate = 2;
 
     /* 2 sec startup delay so FPS is calculated correct */
-    cnt->startup_frames = (cnt->conf.frame_limit * 2) + cnt->conf.pre_capture + cnt->conf.minimum_motion_frames;
+    cnt->startup_frames = (cnt->conf.framerate * 2) + cnt->conf.pre_capture + cnt->conf.minimum_motion_frames;
 
-    cnt->required_frame_time = 1000000L / cnt->conf.frame_limit;
+    cnt->required_frame_time = 1000000L / cnt->conf.framerate;
 
     cnt->frame_delay = cnt->required_frame_time;
 
@@ -1307,7 +1519,7 @@ static int motion_init(struct context *cnt)
      * if there is any problem on the allocation, mymalloc does not return.
      */
     cnt->rolling_average_data = NULL;
-    cnt->rolling_average_limit = 10 * cnt->conf.frame_limit;
+    cnt->rolling_average_limit = 10 * cnt->conf.framerate;
     cnt->rolling_average_data = mymalloc(sizeof(cnt->rolling_average_data) * cnt->rolling_average_limit);
 
     /* Preset history buffer with expected frame rate */
@@ -1315,6 +1527,8 @@ static int motion_init(struct context *cnt)
         cnt->rolling_average_data[indx] = cnt->required_frame_time;
 
 
+    cnt->track_posx = 0;
+    cnt->track_posy = 0;
     if (cnt->track.type)
         cnt->moved = track_center(cnt, cnt->video_dev, 0, 0, 0);
 
@@ -1381,13 +1595,18 @@ static int motion_init(struct context *cnt)
  *
  * Returns:     nothing
  */
-static void motion_cleanup(struct context *cnt)
-{
-    /* Stop stream */
-    event(cnt, EVENT_STOP, NULL, NULL, NULL, NULL);
+static void motion_cleanup(struct context *cnt) {
+
+    if (cnt->conf.stream_preview_method == 99){
+        /* This is the depreciated Stop stream process */
+        if ((cnt->conf.stream_port) && (cnt->stream.socket != -1))
+            stream_stop(&cnt->stream);
+    }
 
     event(cnt, EVENT_TIMELAPSEEND, NULL, NULL, NULL, NULL);
     event(cnt, EVENT_ENDMOTION, NULL, NULL, NULL, NULL);
+
+    mot_stream_deinit(cnt);
 
     if (cnt->video_dev >= 0) {
         MOTION_LOG(INF, TYPE_ALL, NO_ERRNO, _("Calling vid_close() from motion_cleanup"));
@@ -1475,27 +1694,8 @@ static void motion_cleanup(struct context *cnt)
     free(cnt->eventtime_tm);
     cnt->eventtime_tm = NULL;
 
-    if (cnt->conf.database_type) {
-#ifdef HAVE_MYSQL
-        if ( (!strcmp(cnt->conf.database_type, "mysql")) && (cnt->conf.database_dbname)) {
-            mysql_close(cnt->database);
-            cnt->database_event_id = 0;
-        }
-#endif /* HAVE_MYSQL */
+    dbse_deinit(cnt);
 
-#ifdef HAVE_PGSQL
-        if ((!strcmp(cnt->conf.database_type, "postgresql")) && (cnt->conf.database_dbname)) {
-            PQfinish(cnt->database_pg);
-        }
-#endif /* HAVE_PGSQL */
-
-#ifdef HAVE_SQLITE3
-        /* Close the SQLite database */
-        if ((!strcmp(cnt->conf.database_type, "sqlite3")) && (cnt->conf.database_dbname)) {
-            sqlite3_close(cnt->database_sqlite3);
-        }
-#endif /* HAVE_SQLITE3 */
-    }
 }
 
 static void mlp_mask_privacy(struct context *cnt){
@@ -1757,6 +1957,25 @@ static int mlp_retry(struct context *cnt){
         MOTION_LOG(WRN, TYPE_ALL, NO_ERRNO
             ,_("Retrying until successful connection with camera"));
         cnt->video_dev = vid_start(cnt);
+
+        if (cnt->video_dev < 0) {
+            return 1;
+        }
+
+        if ((cnt->imgs.width % 8) || (cnt->imgs.height % 8)) {
+            MOTION_LOG(CRT, TYPE_NETCAM, NO_ERRNO
+                ,_("Image width (%d) or height(%d) requested is not modulo 8.")
+                ,cnt->imgs.width, cnt->imgs.height);
+            return 1;
+        }
+
+        if ((cnt->imgs.width  < 64) || (cnt->imgs.height < 64)){
+            MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
+                ,_("Motion only supports width and height greater than or equal to 64 %dx%d")
+                ,cnt->imgs.width, cnt->imgs.height);
+                return 1;
+        }
+
         /*
          * If the netcam has different dimensions than in the config file
          * we need to restart Motion to re-allocate all the buffers
@@ -1813,7 +2032,7 @@ static int mlp_capture(struct context *cnt){
         cnt->connectionlosttime = 0;
 
         /* If all is well reset missing_frame_counter */
-        if (cnt->missing_frame_counter >= MISSING_FRAMES_TIMEOUT * cnt->conf.frame_limit) {
+        if (cnt->missing_frame_counter >= MISSING_FRAMES_TIMEOUT * cnt->conf.framerate) {
             /* If we previously logged starting a grey image, now log video re-start */
             MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO, _("Video signal re-acquired"));
             // event for re-acquired video signal can be called here
@@ -1857,7 +2076,7 @@ static int mlp_capture(struct context *cnt){
     *        flag on lost_connection if :
     *               vid_return_code == NETCAM_RESTART_ERROR
     *        cnt->video_dev < 0
-    *        cnt->missing_frame_counter > (MISSING_FRAMES_TIMEOUT * cnt->conf.frame_limit)
+    *        cnt->missing_frame_counter > (MISSING_FRAMES_TIMEOUT * cnt->conf.framerate)
     */
     } else {
 
@@ -1901,7 +2120,7 @@ static int mlp_capture(struct context *cnt){
         ++cnt->missing_frame_counter;
 
         if (cnt->video_dev >= 0 &&
-            cnt->missing_frame_counter < (MISSING_FRAMES_TIMEOUT * cnt->conf.frame_limit)) {
+            cnt->missing_frame_counter < (MISSING_FRAMES_TIMEOUT * cnt->conf.framerate)) {
             memcpy(cnt->current_image->image_norm, cnt->imgs.image_virgin.image_norm, cnt->imgs.size_norm);
         } else {
             cnt->lost_connection = 1;
@@ -1919,7 +2138,7 @@ static int mlp_capture(struct context *cnt){
                       10, 20 * cnt->text_scale, tmpout, cnt->text_scale);
 
             /* Write error message only once */
-            if (cnt->missing_frame_counter == MISSING_FRAMES_TIMEOUT * cnt->conf.frame_limit) {
+            if (cnt->missing_frame_counter == MISSING_FRAMES_TIMEOUT * cnt->conf.framerate) {
                 MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
                     ,_("Video signal lost - Adding grey image"));
                 // Event for lost video signal can be called from here
@@ -1931,7 +2150,7 @@ static int mlp_capture(struct context *cnt){
              * Only try this when a device is open
              */
             if ((cnt->video_dev > 0) &&
-                (cnt->missing_frame_counter == (MISSING_FRAMES_TIMEOUT * 4) * cnt->conf.frame_limit)) {
+                (cnt->missing_frame_counter == (MISSING_FRAMES_TIMEOUT * 4) * cnt->conf.framerate)) {
                 MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
                     ,_("Video signal still lost - "
                     "Trying to close video device"));
@@ -2002,13 +2221,14 @@ static void mlp_detection(struct context *cnt){
              * We do not suspend motion detection like we did for lightswitch
              * because with Round Robin this is controlled by roundrobin_skip.
              */
-            if (cnt->conf.switchfilter && cnt->current_image->diffs > cnt->threshold) {
+            if (cnt->conf.roundrobin_switchfilter && cnt->current_image->diffs > cnt->threshold) {
                 cnt->current_image->diffs = alg_switchfilter(cnt, cnt->current_image->diffs,
                                                              cnt->current_image->image_norm);
 
-                if (cnt->current_image->diffs <= cnt->threshold) {
-                    cnt->current_image->diffs = 0;
+                if ((cnt->current_image->diffs <= cnt->threshold) ||
+                    (cnt->current_image->diffs > cnt->threshold_maximum)) {
 
+                    cnt->current_image->diffs = 0;
                     MOTION_LOG(INF, TYPE_ALL, NO_ERRNO, _("Switchfilter detected"));
                 }
             }
@@ -2078,26 +2298,28 @@ static void mlp_tuning(struct context *cnt){
      * changes of noise_level are used.
      */
     if (cnt->process_thisframe) {
-        if (!cnt->conf.noise_tune)
-            cnt->noise = cnt->conf.noise;
-
         /*
          * threshold tuning if enabled
          * if we are not threshold tuning lets make sure that remote controlled
          * changes of threshold are used.
          */
-        if (cnt->conf.threshold_tune)
+        if (cnt->conf.threshold_tune){
             alg_threshold_tune(cnt, cnt->current_image->diffs, cnt->detecting_motion);
-        else
-            cnt->threshold = cnt->conf.max_changes;
+        }
 
         /*
          * If motion is detected (cnt->current_image->diffs > cnt->threshold) and before we add text to the pictures
          * we find the center and size coordinates of the motion to be used for text overlays and later
          * for adding the locate rectangle
          */
-        if (cnt->current_image->diffs > cnt->threshold)
-            alg_locate_center_size(&cnt->imgs, cnt->imgs.width, cnt->imgs.height, &cnt->current_image->location);
+        if ((cnt->current_image->diffs > cnt->threshold) &&
+            (cnt->current_image->diffs < cnt->threshold_maximum)){
+
+            alg_locate_center_size(&cnt->imgs
+                , cnt->imgs.width
+                , cnt->imgs.height
+                , &cnt->current_image->location);
+            }
 
         /*
          * Update reference frame.
@@ -2107,7 +2329,9 @@ static void mlp_tuning(struct context *cnt){
          * at a constant level.
          */
 
-        if ((cnt->current_image->diffs > cnt->threshold) && (cnt->conf.lightswitch_percent == 1) &&
+        if ((cnt->current_image->diffs > cnt->threshold) &&
+            (cnt->current_image->diffs < cnt->threshold_maximum) &&
+            (cnt->conf.lightswitch_percent >= 1) &&
             (cnt->lightswitch_framecounter < (cnt->lastrate * 2)) && /* two seconds window only */
             /* number of changed pixels almost the same in two consecutive frames and */
             ((abs(cnt->previous_diffs - cnt->current_image->diffs)) < (cnt->previous_diffs / 15)) &&
@@ -2143,18 +2367,19 @@ static void mlp_overlay(struct context *cnt){
      */
 
     /* Smartmask overlay */
-    if (cnt->smartmask_speed && (cnt->conf.motion_img || cnt->conf.ffmpeg_output_debug ||
-        cnt->conf.setup_mode))
+    if (cnt->smartmask_speed &&
+        (cnt->conf.picture_output_motion || cnt->conf.movie_output_motion ||
+         cnt->conf.setup_mode || (cnt->stream_motion.cnct_count > 0)))
         overlay_smartmask(cnt, cnt->imgs.img_motion.image_norm);
 
     /* Largest labels overlay */
-    if (cnt->imgs.largest_label && (cnt->conf.motion_img || cnt->conf.ffmpeg_output_debug ||
-        cnt->conf.setup_mode))
+    if (cnt->imgs.largest_label && (cnt->conf.picture_output_motion || cnt->conf.movie_output_motion ||
+        cnt->conf.setup_mode || (cnt->stream_motion.cnct_count > 0)))
         overlay_largest_label(cnt, cnt->imgs.img_motion.image_norm);
 
     /* Fixed mask overlay */
-    if (cnt->imgs.mask && (cnt->conf.motion_img || cnt->conf.ffmpeg_output_debug ||
-        cnt->conf.setup_mode))
+    if (cnt->imgs.mask && (cnt->conf.picture_output_motion || cnt->conf.movie_output_motion ||
+        cnt->conf.setup_mode || (cnt->stream_motion.cnct_count > 0)))
         overlay_fixed_mask(cnt, cnt->imgs.img_motion.image_norm);
 
     /* Add changed pixels in upper right corner of the pictures */
@@ -2172,7 +2397,7 @@ static void mlp_overlay(struct context *cnt){
      * Add changed pixels to motion-images (for stream) in setup_mode
      * and always overlay smartmask (not only when motion is detected)
      */
-    if (cnt->conf.setup_mode) {
+    if (cnt->conf.setup_mode || (cnt->stream_motion.cnct_count > 0)) {
         sprintf(tmp, "D:%5d L:%3d N:%3d", cnt->current_image->diffs,
                 cnt->current_image->total_labels, cnt->noise);
         draw_text(cnt->imgs.img_motion.image_norm, cnt->imgs.width, cnt->imgs.height,
@@ -2234,7 +2459,7 @@ static void mlp_actions(struct context *cnt){
      * If post_capture is enabled we also take care of this in the this
      * code section.
      */
-    if (cnt->conf.emulate_motion && (cnt->startup_frames == 0)) {
+    if ((cnt->conf.emulate_motion || cnt->event_user) && (cnt->startup_frames == 0)) {
         cnt->detecting_motion = 1;
         if (cnt->conf.post_capture > 0) {
             /* Setup the postcap counter */
@@ -2305,7 +2530,7 @@ static void mlp_actions(struct context *cnt){
         cnt->current_image->flags |= IMAGE_PRECAP;
         /* gapless movie feature */
         if ((cnt->conf.event_gap == 0) && (cnt->detecting_motion == 1))
-            cnt->makemovie = 1;
+            cnt->event_stop = TRUE;
         cnt->detecting_motion = 0;
     }
 
@@ -2318,19 +2543,19 @@ static void mlp_actions(struct context *cnt){
 
     /*
      * Is the movie too long? Then make movies
-     * First test for max_movie_time
+     * First test for movie_max_time
      */
-    if ((cnt->conf.max_movie_time && cnt->event_nr == cnt->prev_event) &&
-        (cnt->currenttime - cnt->eventtime >= cnt->conf.max_movie_time))
-        cnt->makemovie = 1;
+    if ((cnt->conf.movie_max_time && cnt->event_nr == cnt->prev_event) &&
+        (cnt->currenttime - cnt->eventtime >= cnt->conf.movie_max_time))
+        cnt->event_stop = TRUE;
 
     /*
      * Now test for quiet longer than 'gap' OR make movie as decided in
      * previous statement.
      */
     if (((cnt->currenttime - cnt->lasttime >= cnt->conf.event_gap) && cnt->conf.event_gap > 0) ||
-          cnt->makemovie) {
-        if (cnt->event_nr == cnt->prev_event || cnt->makemovie) {
+          cnt->event_stop) {
+        if (cnt->event_nr == cnt->prev_event || cnt->event_stop) {
 
             /* Flush image buffer */
             process_image_ring(cnt, IMAGE_BUFFER_FLUSH);
@@ -2352,7 +2577,9 @@ static void mlp_actions(struct context *cnt){
 
             MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO, _("End of event %d"), cnt->event_nr);
 
-            cnt->makemovie = 0;
+            cnt->event_stop = FALSE;
+            cnt->event_user = FALSE;
+
             /* Reset post capture */
             cnt->postcap = 0;
 
@@ -2375,7 +2602,7 @@ static void mlp_actions(struct context *cnt){
 }
 
 static void mlp_setupmode(struct context *cnt){
-/***** MOTION LOOP - SETUP MODE CONSOLE OUTPUT SECTION *****/
+    /***** MOTION LOOP - SETUP MODE CONSOLE OUTPUT SECTION *****/
 
     /* If CAMERA_VERBOSE enabled output some numbers to console */
     if (cnt->conf.setup_mode) {
@@ -2537,81 +2764,75 @@ static void mlp_loopback(struct context *cnt){
 
 }
 
-
 static void mlp_parmsupdate(struct context *cnt){
     /***** MOTION LOOP - ONCE PER SECOND PARAMETER UPDATE SECTION *****/
 
     /* Check for some config parameter changes but only every second */
-    if (cnt->shots == 0) {
+    if (cnt->shots != 0) return;
 
-        init_text_scale(cnt);  /* Initialize and validate text_scale */
+    init_text_scale(cnt);  /* Initialize and validate text_scale */
 
-        if (strcasecmp(cnt->conf.output_pictures, "on") == 0)
-            cnt->new_img = NEWIMG_ON;
-        else if (strcasecmp(cnt->conf.output_pictures, "first") == 0)
-            cnt->new_img = NEWIMG_FIRST;
-        else if (strcasecmp(cnt->conf.output_pictures, "best") == 0)
-            cnt->new_img = NEWIMG_BEST;
-        else if (strcasecmp(cnt->conf.output_pictures, "center") == 0)
-            cnt->new_img = NEWIMG_CENTER;
-        else
-            cnt->new_img = NEWIMG_OFF;
+    if (strcasecmp(cnt->conf.picture_output, "on") == 0)
+        cnt->new_img = NEWIMG_ON;
+    else if (strcasecmp(cnt->conf.picture_output, "first") == 0)
+        cnt->new_img = NEWIMG_FIRST;
+    else if (strcasecmp(cnt->conf.picture_output, "best") == 0)
+        cnt->new_img = NEWIMG_BEST;
+    else if (strcasecmp(cnt->conf.picture_output, "center") == 0)
+        cnt->new_img = NEWIMG_CENTER;
+    else
+        cnt->new_img = NEWIMG_OFF;
 
-        if (strcasecmp(cnt->conf.locate_motion_mode, "on") == 0)
-            cnt->locate_motion_mode = LOCATE_ON;
-        else if (strcasecmp(cnt->conf.locate_motion_mode, "preview") == 0)
-            cnt->locate_motion_mode = LOCATE_PREVIEW;
-        else
-            cnt->locate_motion_mode = LOCATE_OFF;
+    if (strcasecmp(cnt->conf.locate_motion_mode, "on") == 0)
+        cnt->locate_motion_mode = LOCATE_ON;
+    else if (strcasecmp(cnt->conf.locate_motion_mode, "preview") == 0)
+        cnt->locate_motion_mode = LOCATE_PREVIEW;
+    else
+        cnt->locate_motion_mode = LOCATE_OFF;
 
-        if (strcasecmp(cnt->conf.locate_motion_style, "box") == 0)
-            cnt->locate_motion_style = LOCATE_BOX;
-        else if (strcasecmp(cnt->conf.locate_motion_style, "redbox") == 0)
-            cnt->locate_motion_style = LOCATE_REDBOX;
-        else if (strcasecmp(cnt->conf.locate_motion_style, "cross") == 0)
-            cnt->locate_motion_style = LOCATE_CROSS;
-        else if (strcasecmp(cnt->conf.locate_motion_style, "redcross") == 0)
-            cnt->locate_motion_style = LOCATE_REDCROSS;
-        else
-            cnt->locate_motion_style = LOCATE_BOX;
+    if (strcasecmp(cnt->conf.locate_motion_style, "box") == 0)
+        cnt->locate_motion_style = LOCATE_BOX;
+    else if (strcasecmp(cnt->conf.locate_motion_style, "redbox") == 0)
+        cnt->locate_motion_style = LOCATE_REDBOX;
+    else if (strcasecmp(cnt->conf.locate_motion_style, "cross") == 0)
+        cnt->locate_motion_style = LOCATE_CROSS;
+    else if (strcasecmp(cnt->conf.locate_motion_style, "redcross") == 0)
+        cnt->locate_motion_style = LOCATE_REDCROSS;
+    else
+        cnt->locate_motion_style = LOCATE_BOX;
 
-        /* Sanity check for smart_mask_speed, silly value disables smart mask */
-        if (cnt->conf.smart_mask_speed < 0 || cnt->conf.smart_mask_speed > 10)
-            cnt->conf.smart_mask_speed = 0;
+    /* Sanity check for smart_mask_speed, silly value disables smart mask */
+    if (cnt->conf.smart_mask_speed < 0 || cnt->conf.smart_mask_speed > 10)
+        cnt->conf.smart_mask_speed = 0;
 
-        /* Has someone changed smart_mask_speed or framerate? */
-        if (cnt->conf.smart_mask_speed != cnt->smartmask_speed ||
-            cnt->smartmask_lastrate != cnt->lastrate) {
-            if (cnt->conf.smart_mask_speed == 0) {
-                memset(cnt->imgs.smartmask, 0, cnt->imgs.motionsize);
-                memset(cnt->imgs.smartmask_final, 255, cnt->imgs.motionsize);
-            }
-
-            cnt->smartmask_lastrate = cnt->lastrate;
-            cnt->smartmask_speed = cnt->conf.smart_mask_speed;
-            /*
-             * Decay delay - based on smart_mask_speed (framerate independent)
-             * This is always 5*smartmask_speed seconds
-             */
-            cnt->smartmask_ratio = 5 * cnt->lastrate * (11 - cnt->smartmask_speed);
+    /* Has someone changed smart_mask_speed or framerate? */
+    if (cnt->conf.smart_mask_speed != cnt->smartmask_speed ||
+        cnt->smartmask_lastrate != cnt->lastrate) {
+        if (cnt->conf.smart_mask_speed == 0) {
+            memset(cnt->imgs.smartmask, 0, cnt->imgs.motionsize);
+            memset(cnt->imgs.smartmask_final, 255, cnt->imgs.motionsize);
         }
 
-#if defined(HAVE_MYSQL) || defined(HAVE_PGSQL) || defined(HAVE_SQLITE3)
-
+        cnt->smartmask_lastrate = cnt->lastrate;
+        cnt->smartmask_speed = cnt->conf.smart_mask_speed;
         /*
-         * Set the sql mask file according to the SQL config options
-         * We update it for every frame in case the config was updated
-         * via remote control.
-         */
-        cnt->sql_mask = cnt->conf.sql_log_image * (FTYPE_IMAGE + FTYPE_IMAGE_MOTION) +
-                        cnt->conf.sql_log_snapshot * FTYPE_IMAGE_SNAPSHOT +
-                        cnt->conf.sql_log_movie * (FTYPE_MPEG + FTYPE_MPEG_MOTION) +
-                        cnt->conf.sql_log_timelapse * FTYPE_MPEG_TIMELAPSE;
-#endif /* defined(HAVE_MYSQL) || defined(HAVE_PGSQL) || defined(HAVE_SQLITE3) */
+            * Decay delay - based on smart_mask_speed (framerate independent)
+            * This is always 5*smartmask_speed seconds
+            */
+        cnt->smartmask_ratio = 5 * cnt->lastrate * (11 - cnt->smartmask_speed);
+    }
 
+    dbse_sqlmask_update(cnt);
 
+    cnt->threshold = cnt->conf.threshold;
+    if (cnt->conf.threshold_maximum > cnt->conf.threshold ){
+        cnt->threshold_maximum = cnt->conf.threshold_maximum;
+    } else {
+        cnt->threshold_maximum = (cnt->imgs.height * cnt->imgs.width * 3) / 2;
+    }
 
-
+    if (!cnt->conf.noise_tune){
+        cnt->noise = cnt->conf.noise_level;
     }
 
 }
@@ -2628,8 +2849,8 @@ static void mlp_frametiming(struct context *cnt){
      * Work out expected frame rate based on config setting which may
      * have changed from http-control
      */
-    if (cnt->conf.frame_limit)
-        cnt->required_frame_time = 1000000L / cnt->conf.frame_limit;
+    if (cnt->conf.framerate)
+        cnt->required_frame_time = 1000000L / cnt->conf.framerate;
     else
         cnt->required_frame_time = 0;
 
@@ -2687,7 +2908,7 @@ static void *motion_loop(void *arg)
     struct context *cnt = arg;
 
     if (motion_init(cnt) == 0){
-        while (!cnt->finish || cnt->makemovie) {
+        while (!cnt->finish || cnt->event_stop) {
             mlp_prepare(cnt);
             if (cnt->get_image) {
                 mlp_resetimages(cnt);
@@ -2859,69 +3080,12 @@ static void cntlist_create(int argc, char *argv[]){
     cnt_list = conf_load(cnt_list);
 }
 
-static void dbse_global_deinit(void){
-    MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO, _("Closing MYSQL"));
-#ifdef HAVE_MYSQL
-    mysql_library_end();
-#endif /* HAVE_MYSQL */
-}
-
-static void dbse_global_init(void){
-
-    MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("Initializing database"));
-   /* Initialize all the database items */
-#ifdef HAVE_MYSQL
-    if (mysql_library_init(0, NULL, NULL)) {
-        fprintf(stderr, "could not initialize MySQL library\n");
-        exit(1);
-    }
-#endif /* HAVE_MYSQL */
-
-#ifdef HAVE_SQLITE3
-    int indx;
-    /* database_sqlite3 == NULL if not changed causes each thread to create their own
-     * sqlite3 connection this will only happens when using a non-threaded sqlite version */
-    cnt_list[0]->database_sqlite3=NULL;
-    if (cnt_list[0]->conf.database_type && ((!strcmp(cnt_list[0]->conf.database_type, "sqlite3")) && cnt_list[0]->conf.database_dbname)) {
-        MOTION_LOG(NTC, TYPE_DB, NO_ERRNO
-            ,_("SQLite3 Database filename %s")
-            ,cnt_list[0]->conf.database_dbname);
-
-        int thread_safe = sqlite3_threadsafe();
-        if (thread_safe > 0) {
-            MOTION_LOG(NTC, TYPE_DB, NO_ERRNO, _("SQLite3 is threadsafe"));
-            MOTION_LOG(NTC, TYPE_DB, NO_ERRNO, _("SQLite3 serialized %s")
-                ,(sqlite3_config(SQLITE_CONFIG_SERIALIZED)?_("FAILED"):_("SUCCESS")));
-            if (sqlite3_open( cnt_list[0]->conf.database_dbname, &cnt_list[0]->database_sqlite3) != SQLITE_OK) {
-                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO
-                    ,_("Can't open database %s : %s")
-                    ,cnt_list[0]->conf.database_dbname
-                    ,sqlite3_errmsg( cnt_list[0]->database_sqlite3));
-                sqlite3_close( cnt_list[0]->database_sqlite3);
-                exit(1);
-            }
-            MOTION_LOG(NTC, TYPE_DB, NO_ERRNO,_("database_busy_timeout %d msec"),
-                    cnt_list[0]->conf.database_busy_timeout);
-            if (sqlite3_busy_timeout( cnt_list[0]->database_sqlite3,  cnt_list[0]->conf.database_busy_timeout) != SQLITE_OK)
-                MOTION_LOG(ERR, TYPE_DB, NO_ERRNO,_("database_busy_timeout failed %s")
-                    ,sqlite3_errmsg( cnt_list[0]->database_sqlite3));
-        }
-    }
-    /* Cascade to all threads */
-    indx = 1;
-    while (cnt_list[indx] != NULL) {
-        cnt_list[indx]->database_sqlite3 = cnt_list[0]->database_sqlite3;
-        indx++;
-    }
-
-#endif /* HAVE_SQLITE3 */
-
-}
-
 static void motion_shutdown(void){
     int i = -1;
 
     motion_remove_pid();
+
+    webu_stop(cnt_list);
 
     while (cnt_list[++i])
         context_destroy(cnt_list[i]);
@@ -2931,6 +3095,45 @@ static void motion_shutdown(void){
 
     vid_mutex_destroy();
 }
+
+static void motion_camera_ids(void){
+    /* Set the camera id's on the context.  They must be unique */
+    int indx, indx2, invalid_ids;
+
+    /* Set defaults */
+    indx = 0;
+    while (cnt_list[indx] != NULL){
+        if (cnt_list[indx]->conf.camera_id > 0){
+            cnt_list[indx]->camera_id = cnt_list[indx]->conf.camera_id;
+        } else {
+            cnt_list[indx]->camera_id = indx;
+        }
+        indx++;
+    }
+
+    invalid_ids = FALSE;
+    indx = 0;
+    while (cnt_list[indx] != NULL){
+        if (cnt_list[indx]->camera_id > 32000) invalid_ids = TRUE;
+        indx2 = indx + 1;
+        while (cnt_list[indx2] != NULL){
+            if (cnt_list[indx]->camera_id == cnt_list[indx2]->camera_id) invalid_ids = TRUE;
+
+            indx2++;
+        }
+        indx++;
+    }
+    if (invalid_ids){
+        MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
+            ,_("Camara IDs are not unique or have values over 32,000.  Falling back to thread numbers"));
+        indx = 0;
+        while (cnt_list[indx] != NULL){
+            cnt_list[indx]->camera_id = indx;
+            indx++;
+        }
+    }
+}
+
 
 /**
  * motion_startup
@@ -2992,10 +3195,10 @@ static void motion_startup(int daemonize, int argc, char *argv[])
 
     MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO, "Motion %s Started",VERSION);
 
-    if ((cnt_list[0]->conf.log_type_str == NULL) ||
-        !(cnt_list[0]->log_type = get_log_type(cnt_list[0]->conf.log_type_str))) {
+    if ((cnt_list[0]->conf.log_type == NULL) ||
+        !(cnt_list[0]->log_type = get_log_type(cnt_list[0]->conf.log_type))) {
         cnt_list[0]->log_type = TYPE_DEFAULT;
-        cnt_list[0]->conf.log_type_str = mystrcpy(cnt_list[0]->conf.log_type_str, "ALL");
+        cnt_list[0]->conf.log_type = mystrcpy(cnt_list[0]->conf.log_type, "ALL");
         MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO,_("Using default log type (%s)"),
                    get_log_type_str(cnt_list[0]->log_type));
     }
@@ -3006,9 +3209,6 @@ static void motion_startup(int daemonize, int argc, char *argv[])
     set_log_level(cnt_list[0]->log_level);
     set_log_type(cnt_list[0]->log_type);
 
-    conf_output_parms(cnt_list);
-
-    initialize_chars();
 
     if (daemonize) {
         /*
@@ -3023,6 +3223,14 @@ static void motion_startup(int daemonize, int argc, char *argv[])
 
     if (cnt_list[0]->conf.setup_mode)
         MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO,_("Motion running in setup mode."));
+
+    conf_output_parms(cnt_list);
+
+    motion_camera_ids();
+
+    initialize_chars();
+
+    webu_start(cnt_list);
 
     vid_mutex_init();
 
@@ -3048,18 +3256,18 @@ static void motion_start_thread(struct context *cnt){
     if (strcmp(cnt->conf_filename, "")){
         cnt->conf_filename[sizeof(cnt->conf_filename) - 1] = '\0';
         MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO, _("Camera ID: %d is from %s")
-            ,cnt->conf.camera_id, cnt->conf_filename);
+            ,cnt->camera_id, cnt->conf_filename);
     }
 
     if (cnt->conf.netcam_url){
         snprintf(service,6,"%s",cnt->conf.netcam_url);
         MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO,_("Camera ID: %d Camera Name: %s Service: %s")
-            ,cnt->conf.camera_id, cnt->conf.camera_name,service);
+            ,cnt->camera_id, cnt->conf.camera_name,service);
         MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO, _("Stream port %d"),
             cnt->conf.stream_port);
     } else {
         MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO,_("Camera ID: %d Camera Name: %s Device: %s")
-            ,cnt->conf.camera_id, cnt->conf.camera_name,cnt->conf.video_device);
+            ,cnt->camera_id, cnt->conf.camera_name,cnt->conf.video_device);
     }
 
     /*
@@ -3148,33 +3356,6 @@ static void motion_restart(int argc, char **argv){
     restart = 0;
 }
 
-static void motion_webcontrol_start(void){
-
-  /* Create a thread for the web control interface if requested. */
-
-    pthread_attr_t thread_attr;
-    pthread_t thread_id;
-
-    if (cnt_list[0]->conf.webcontrol_port) {
-        pthread_mutex_lock(&global_lock);
-            threads_running++;
-            cnt_list[0]->webcontrol_running = 1;
-        pthread_mutex_unlock(&global_lock);
-
-        pthread_attr_init(&thread_attr);
-        pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED);
-
-        if (pthread_create(&thread_id, &thread_attr, &webu_main, cnt_list)) {
-            /* thread create failed, undo running state */
-            pthread_mutex_lock(&global_lock);
-                threads_running--;
-                cnt_list[0]->webcontrol_running = 0;
-            pthread_mutex_unlock(&global_lock);
-        }
-        pthread_attr_destroy(&thread_attr);
-    }
-}
-
 static void motion_watchdog(int indx){
 
     /* Notes:
@@ -3196,7 +3377,7 @@ static void motion_watchdog(int indx){
         MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
             ,_("Thread %d - Watchdog timeout. Trying to do a graceful restart")
             , cnt_list[indx]->threadnr);
-        cnt_list[indx]->makemovie = 1; /* Trigger end of event */
+        cnt_list[indx]->event_stop = TRUE; /* Trigger end of event */
         cnt_list[indx]->finish = 1;
     }
 
@@ -3293,9 +3474,6 @@ static int motion_check_threadcount(void){
         if (cnt_list[indx]->running || cnt_list[indx]->restart)
             motion_threads_running++;
     }
-    if (cnt_list[0]->conf.webcontrol_port &&
-        cnt_list[0]->webcontrol_running)
-        motion_threads_running++;
 
     if (((motion_threads_running == 0) && finish) ||
         ((motion_threads_running == 0) && (threads_running == 0))) {
@@ -3344,11 +3522,8 @@ int main (int argc, char **argv)
 
         for (i = cnt_list[1] != NULL ? 1 : 0; cnt_list[i]; i++) {
             cnt_list[i]->threadnr = i ? i : 1;
-            cnt_list[i]->conf.camera_id = cnt_list[i]->conf.camera_id ? cnt_list[i]->conf.camera_id: i;
             motion_start_thread(cnt_list[i]);
         }
-
-        motion_webcontrol_start();
 
         MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
             ,_("Waiting for threads to finish, pid: %d"), getpid());
@@ -3747,7 +3922,7 @@ size_t mystrftime(const struct context *cnt, char *s, size_t max, const char *us
                 break;
 
             case 't': // camera id
-                sprintf(tempstr, "%*d", width, cnt->conf.camera_id);
+                sprintf(tempstr, "%*d", width, cnt->camera_id);
                 break;
 
             case 'C': // text_event
@@ -3873,12 +4048,12 @@ void util_threadname_get(char *threadname){
 }
 int util_check_passthrough(struct context *cnt){
 #if (HAVE_FFMPEG && LIBAVFORMAT_VERSION_MAJOR < 55)
-    if (cnt->conf.ffmpeg_passthrough)
+    if (cnt->conf.movie_passthrough)
         MOTION_LOG(INF, TYPE_NETCAM, NO_ERRNO
             ,_("FFMPEG version too old. Disabling pass-through processing."));
     return 0;
 #else
-    if (cnt->conf.ffmpeg_passthrough){
+    if (cnt->conf.movie_passthrough){
         MOTION_LOG(INF, TYPE_NETCAM, NO_ERRNO
             ,_("pass-through is enabled but is still experimental."));
         return 1;

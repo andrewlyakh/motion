@@ -227,7 +227,7 @@ static void put_subjectarea(struct tiff_writing *into, const struct coord *box)
  */
 static unsigned prepare_exif(unsigned char **exif,
               const struct context *cnt,
-              const struct timeval *tv1,
+              const struct timeval *tv_in1,
               const struct coord *box)
 {
     /* description, datetime, and subtime are the values that are actually
@@ -236,29 +236,32 @@ static unsigned prepare_exif(unsigned char **exif,
     char *description, *datetime, *subtime;
     char datetime_buf[22];
     struct tm timestamp_tm;
+    struct timeval tv1;
 
-    if (tv1->tv_sec) {
-        localtime_r(&tv1->tv_sec, &timestamp_tm);
-    /* Exif requires this exact format */
-        snprintf(datetime_buf, 21, "%04d:%02d:%02d %02d:%02d:%02d",
-                timestamp_tm.tm_year + 1900,
-                timestamp_tm.tm_mon + 1,
-                timestamp_tm.tm_mday,
-                timestamp_tm.tm_hour,
-                timestamp_tm.tm_min,
-                timestamp_tm.tm_sec);
-        datetime = datetime_buf;
-    } else {
-        datetime = NULL;
+    gettimeofday(&tv1, NULL);
+    if (tv_in1 != NULL) {
+        tv1.tv_sec = tv_in1->tv_sec;
+        tv1.tv_usec = tv_in1->tv_usec;
     }
+
+    localtime_r(&tv1.tv_sec, &timestamp_tm);
+    /* Exif requires this exact format */
+    snprintf(datetime_buf, 21, "%04d:%02d:%02d %02d:%02d:%02d",
+            timestamp_tm.tm_year + 1900,
+            timestamp_tm.tm_mon + 1,
+            timestamp_tm.tm_mday,
+            timestamp_tm.tm_hour,
+            timestamp_tm.tm_min,
+            timestamp_tm.tm_sec);
+    datetime = datetime_buf;
 
     // TODO: Extract subsecond timestamp from somewhere, but only
     // use as much of it as is indicated by conf->frame_limit
     subtime = NULL;
 
-    if (cnt->conf.exif_text) {
+    if (cnt->conf.picture_exif) {
         description = malloc(PATH_MAX);
-        mystrftime(cnt, description, PATH_MAX-1, cnt->conf.exif_text, tv1, NULL, 0);
+        mystrftime(cnt, description, PATH_MAX-1, cnt->conf.picture_exif, &tv1, NULL, 0);
     } else {
         description = NULL;
     }
@@ -878,14 +881,14 @@ static void put_ppm_bgr24_file(FILE *picture, unsigned char *image, int width, i
             rgb[2] = r;
 
             l++;
-            if (x & 1) {
+            if (x%2 != 0) {
                 u++;
                 v++;
             }
             /* ppm is rgb not bgr */
             fwrite(rgb, 1, 3, picture);
         }
-        if (y & 1) {
+        if (y%2 == 0) {
             u -= width / 2;
             v -= width / 2;
         }
@@ -1043,22 +1046,20 @@ void overlay_largest_label(struct context *cnt, unsigned char *out)
 int put_picture_memory(struct context *cnt, unsigned char* dest_image, int image_size, unsigned char *image,
         int quality, int width, int height)
 {
-    /* The application currently has functionality to process grey images into JPGs that
-     * we want to keep for future enhancements.  To avoid a unused function compiler warning
-     * we put in this dummy check so it appears we use the functionality.  Once the enhancement
-     * is implemented, we can remove this condition and just process the jpg_yuv420.
+    struct timeval tv1;
+
+    /*
+     * Reset the time for the current image since it is not reliable
+     * for putting images to memory.
      */
+    gettimeofday(&tv1, NULL);
 
     if (!cnt->conf.stream_grey){
         return put_jpeg_yuv420p_memory(dest_image, image_size, image,
-                                       width, height, quality, cnt
-                                       , &(cnt->current_image->timestamp_tv)
-                                       , &(cnt->current_image->location));
+                                       width, height, quality, cnt ,&tv1,NULL);
     } else {
         return put_jpeg_grey_memory(dest_image, image_size, image,
-                                       width, height, quality, cnt
-                                       , &(cnt->current_image->timestamp_tv)
-                                       , &(cnt->current_image->location));
+                                       width, height, quality, cnt,&tv1,NULL);
     }
 
     return 0;
@@ -1119,7 +1120,7 @@ void put_picture(struct context *cnt, char *file, unsigned char *image, int ftyp
         }
     }
 
-    put_picture_fd(cnt, picture, image, cnt->conf.quality, ftype);
+    put_picture_fd(cnt, picture, image, cnt->conf.picture_quality, ftype);
 
     myfclose(picture);
 }
@@ -1261,30 +1262,19 @@ void put_fixed_mask(struct context *cnt, const char *file)
         "re-run motion to enable mask feature"), cnt->conf.mask_file);
 }
 
-/**
- * scale_half_yuv420p
- *      scale down by half yuv420p
- *
- * Returns pointer to scaled image
- */
-
-unsigned char *scale_half_yuv420p(int origwidth, int origheight, unsigned char *img)
-{
-    /* allocate buffer for resized image */
-    unsigned char *scaled_img = mymalloc ((origwidth/2 * origheight/2) * 3 / 2);
+void pic_scale_img(int width_src, int height_src, unsigned char *img_src, unsigned char *img_dst){
 
     int i = 0, x, y;
-    for (y = 0; y < origheight; y+=2)
-        for (x = 0; x < origwidth; x+=2)
-            scaled_img[i++] = img[y * origwidth + x];
+    for (y = 0; y < height_src; y+=2)
+        for (x = 0; x < width_src; x+=2)
+            img_dst[i++] = img_src[y * width_src + x];
 
-    for (y = 0; y < origheight / 2; y+=2)
-       for (x = 0; x < origwidth; x += 4)
+    for (y = 0; y < height_src / 2; y+=2)
+       for (x = 0; x < width_src; x += 4)
        {
-          scaled_img[i++] = img[(origwidth * origheight) + (y * origwidth) + x];
-          scaled_img[i++] = img[(origwidth * origheight) + (y * origwidth) + (x + 1)];
+          img_dst[i++] = img_src[(width_src * height_src) + (y * width_src) + x];
+          img_dst[i++] = img_src[(width_src * height_src) + (y * width_src) + (x + 1)];
        }
 
-    return scaled_img;
+    return;
 }
-

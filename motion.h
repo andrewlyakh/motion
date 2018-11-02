@@ -51,6 +51,7 @@ struct image_data;
 #include <sys/param.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <microhttpd.h>
 
 #ifdef __FreeBSD__
 #include <pthread_np.h>
@@ -100,21 +101,16 @@ struct image_data;
 #define DEF_PALETTE             17
 
 /* Default picture settings */
-#define DEF_WIDTH              352
-#define DEF_HEIGHT             288
+#define DEF_WIDTH              640
+#define DEF_HEIGHT             480
 #define DEF_QUALITY             75
 #define DEF_CHANGES           1500
 
-#define DEF_MAXFRAMERATE       100
+#define DEF_MAXFRAMERATE        15
 #define DEF_NOISELEVEL          32
 
 /* Minimum time between two 'actions' (email, sms, external) */
 #define DEF_EVENT_GAP            60  /* 1 minutes */
-#define DEF_MAXMOVIETIME       3600  /* 60 minutes */
-
-#define DEF_FFMPEG_BPS      400000
-#define DEF_FFMPEG_VBR           0
-#define DEF_FFMPEG_CODEC   "mpeg4"
 
 #define DEF_INPUT               -1
 #define DEF_VIDEO_DEVICE         "/dev/video0"
@@ -256,6 +252,12 @@ struct image_data {
 
 };
 
+struct stream_data {
+    unsigned char   *jpeg_data; /* Image compressed as JPG */
+    long            jpeg_size;  /* The number of bytes for jpg */
+    int             cnct_count; /* Counter of the number of connections */
+};
+
 /*
  * DIFFERENCES BETWEEN imgs.width, conf.width AND rotate_data.cap_width
  * (and the corresponding height values, of course)
@@ -304,6 +306,7 @@ struct images {
     unsigned char *smartmask;
     unsigned char *smartmask_final;
     unsigned char *common_buffer;
+    unsigned char *substream_image;
 
     unsigned char *mask_privacy;      /* Buffer for the privacy mask values */
     unsigned char *mask_privacy_uv;   /* Buffer for the privacy U&V values */
@@ -373,6 +376,8 @@ struct context {
     struct config conf;
     struct images imgs;
     struct trackoptions track;
+    int                 track_posx;
+    int                 track_posy;
 
     enum CAMERA_TYPE      camera_type;
     struct netcam_context *netcam;
@@ -394,13 +399,15 @@ struct context {
 
     int noise;
     int threshold;
+    int threshold_maximum;
     int diffs_last[THRESHOLD_TUNE_LENGTH];
     int smartmask_speed;
 
 
     /* Commands to the motion thread */
     volatile unsigned int snapshot;    /* Make a snapshot */
-    volatile unsigned int makemovie;   /* End a movie */
+    volatile unsigned int event_stop;  /* Boolean for whether to stop a event */
+    volatile unsigned int event_user;  /* Boolean for whether to user triggered an event */
     volatile unsigned int finish;      /* End the thread */
     volatile unsigned int restart;     /* Restart the thread when it ends */
     /* Is the motion thread running */
@@ -444,15 +451,9 @@ struct context {
     struct stream stream;
     int stream_count;
 
-    struct stream substream;
-    int substream_count;
-
     char hostname[PATH_MAX];
 
-
-#if defined(HAVE_MYSQL) || defined(HAVE_PGSQL) || defined(HAVE_SQLITE3)
     int sql_mask;
-#endif
 
 #ifdef HAVE_SQLITE3
     sqlite3 *database_sqlite3;
@@ -460,7 +461,6 @@ struct context {
 
 #ifdef HAVE_MYSQL
     MYSQL *database;
-
 #endif
 
 #ifdef HAVE_PGSQL
@@ -473,7 +473,7 @@ struct context {
     int movie_last_shot;
 
     struct ffmpeg *ffmpeg_output;
-    struct ffmpeg *ffmpeg_output_debug;
+    struct ffmpeg *ffmpeg_output_motion;
     struct ffmpeg *ffmpeg_timelapse;
 
     char timelapsefilename[PATH_MAX];
@@ -506,6 +506,20 @@ struct context {
 
     unsigned int passflag;  //only purpose is to flag first frame vs all others.....
     int rolling_frame;
+
+    struct MHD_Daemon   *webcontrol_daemon;
+    struct MHD_Daemon   *webstream_daemon;
+    char                webcontrol_digest_rand[8];
+    char                webstream_digest_rand[8];
+    int                 camera_id;
+
+    pthread_mutex_t     mutex_stream;
+
+    struct stream_data  stream_norm;    /* Copy of the image to use for web stream*/
+    struct stream_data  stream_sub;     /* Copy of the image to use for web stream*/
+    struct stream_data  stream_motion;  /* Copy of the image to use for web stream*/
+    struct stream_data  stream_source;  /* Copy of the image to use for web stream*/
+
     
     double diffWidthPerc;
     double diffHeightPerc;
