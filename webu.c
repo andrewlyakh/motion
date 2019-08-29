@@ -86,6 +86,7 @@ static void webu_context_init(struct context **cntlst, struct context *cnt, stru
     webui->resp_size     = WEBUI_LEN_RESP * 10; /* The size of the resp_page buffer.  May get adjusted */
     webui->resp_used     = 0;                   /* How many bytes used so far in resp_page*/
     webui->stream_pos    = 0;                   /* Stream position of image being sent */
+    webui->stream_fps    = 1;                   /* Stream rate */
     webui->resp_page     = mymalloc(webui->resp_size);      /* The response being constructed */
     webui->cntlst        = cntlst;  /* The list of context's for all cameras */
     webui->cnt           = cnt;     /* The context pointer for a single camera */
@@ -575,20 +576,52 @@ void webu_process_action(struct webui_ctx *webui) {
 
 
     } else if (!strcmp(webui->uri_cmd2,"restart")){
-        /* This is the legacy method...(we can do better than signals..).*/
         if (webui->thread_nbr == 0) {
-            MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO, _("httpd is going to restart"));
-            kill(getpid(),SIGHUP);
+            MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO, _("Restarting all threads"));
             webui->cntlst[0]->webcontrol_finish = TRUE;
+            kill(getpid(),SIGHUP);
         } else {
             MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO,
-                _("httpd is going to restart thread %d"),webui->thread_nbr);
+                _("Restarting thread %d"),webui->thread_nbr);
+            webui->cnt->restart = TRUE;
             if (webui->cnt->running) {
                 webui->cnt->event_stop = TRUE;
-                webui->cnt->finish = 1;
+                webui->cnt->finish = TRUE;
             }
-            webui->cnt->restart = 1;
+
         }
+
+    } else if (!strcmp(webui->uri_cmd2,"quit")){
+        if (webui->thread_nbr == 0 && webui->cam_threads > 1) {
+            while (webui->cntlst[++indx]){
+                MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO,
+                    _("Quitting thread %d"),webui->thread_nbr);
+                webui->cntlst[indx]->restart = FALSE;
+                webui->cntlst[indx]->event_stop = TRUE;
+                webui->cntlst[indx]->event_user = TRUE;
+                webui->cntlst[indx]->finish = TRUE;
+            }
+        } else {
+            MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO,
+                _("Quitting thread %d"),webui->thread_nbr);
+            webui->cnt->restart = FALSE;
+            webui->cnt->event_stop = TRUE;
+            webui->cnt->event_user = TRUE;
+            webui->cnt->finish = TRUE;
+        }
+
+    } else if (!strcmp(webui->uri_cmd2,"end")){
+            MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO, _("Motion terminating"));
+            while (webui->cntlst[indx]){
+                webui->cntlst[indx]->webcontrol_finish = TRUE;
+                webui->cntlst[indx]->restart = FALSE;
+                webui->cntlst[indx]->event_stop = TRUE;
+                webui->cntlst[indx]->event_user = TRUE;
+                webui->cntlst[indx]->finish = TRUE;
+                indx++;
+            }
+
+
     } else if (!strcmp(webui->uri_cmd2,"start")){
         if (webui->thread_nbr == 0 && webui->cam_threads > 1) {
             do {
@@ -831,10 +864,19 @@ static void webu_hostname(struct webui_ctx *webui, int ctrl) {
     hdr = MHD_lookup_connection_value (webui->connection, MHD_HEADER_KIND, MHD_HTTP_HEADER_HOST);
     if (hdr != NULL){
         snprintf(webui->hostname, WEBUI_LEN_PARM, "%s", hdr);
-        en_pos = strstr(webui->hostname, ":");
-        if (en_pos != NULL){
-            host_len = en_pos - webui->hostname + 1;
-            snprintf(webui->hostname, host_len, "%s", hdr);
+        /* IPv6 addresses have :'s in them so special case them */
+        if (webui->hostname[0] == '['){
+            en_pos = strstr(webui->hostname, "]");
+            if (en_pos != NULL){
+                host_len = en_pos - webui->hostname + 2;
+                snprintf(webui->hostname, host_len, "%s", hdr);
+            }
+        } else {
+            en_pos = strstr(webui->hostname, ":");
+            if (en_pos != NULL){
+                host_len = en_pos - webui->hostname + 1;
+                snprintf(webui->hostname, host_len, "%s", hdr);
+            }
         }
     } else {
         gethostname(webui->hostname, WEBUI_LEN_PARM - 1);
@@ -1147,6 +1189,10 @@ static void webu_answer_strm_type(struct webui_ctx *webui) {
         (strcmp(webui->uri_camid,"current") == 0)){
         webui->cnct_type = WEBUI_CNCT_STATIC;
 
+    } else if ((strlen(webui->uri_camid) > 0) &&
+        (strlen(webui->uri_cmd1) == 0)){
+        webui->cnct_type = WEBUI_CNCT_FULL;
+
     } else {
         webui->cnct_type = WEBUI_CNCT_UNKNOWN;
     }
@@ -1266,6 +1312,9 @@ static int webu_answer_strm(void *cls
         retcd = webu_mhd_send(webui, FALSE);
         return retcd;
     }
+
+    /* Do not answer a request until the motion loop has completed at least once */
+    if (webui->cnt->passflag == 0) return MHD_NO;
 
     if (webui->cnt->webcontrol_finish) return MHD_NO;
 
@@ -1434,7 +1483,7 @@ static void webu_mhd_features_basic(struct mhdstart_ctx *mhdst){
         int retcd;
         retcd = MHD_is_feature_supported (MHD_FEATURE_BASIC_AUTH);
         if (retcd == MHD_YES){
-            MOTION_LOG(INF, TYPE_STREAM, NO_ERRNO ,_("Basic authentication: available"));
+            MOTION_LOG(DBG, TYPE_STREAM, NO_ERRNO ,_("Basic authentication: available"));
         } else {
             if ((mhdst->ctrl) && (mhdst->cnt[mhdst->indxthrd]->conf.webcontrol_auth_method == 1)){
                 MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO ,_("Basic authentication: disabled"));
@@ -1457,7 +1506,7 @@ static void webu_mhd_features_digest(struct mhdstart_ctx *mhdst){
         int retcd;
         retcd = MHD_is_feature_supported (MHD_FEATURE_DIGEST_AUTH);
         if (retcd == MHD_YES){
-            MOTION_LOG(INF, TYPE_STREAM, NO_ERRNO ,_("Digest authentication: available"));
+            MOTION_LOG(DBG, TYPE_STREAM, NO_ERRNO ,_("Digest authentication: available"));
         } else {
             if ((mhdst->ctrl) && (mhdst->cnt[mhdst->indxthrd]->conf.webcontrol_auth_method == 2)){
                 MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO ,_("Digest authentication: disabled"));
@@ -1486,9 +1535,9 @@ static void webu_mhd_features_ipv6(struct mhdstart_ctx *mhdst){
         int retcd;
         retcd = MHD_is_feature_supported (MHD_FEATURE_IPv6);
         if (retcd == MHD_YES){
-            MOTION_LOG(INF, TYPE_STREAM, NO_ERRNO ,_("IPV6: available"));
+            MOTION_LOG(DBG, TYPE_STREAM, NO_ERRNO ,_("IPV6: available"));
         } else {
-            MOTION_LOG(INF, TYPE_STREAM, NO_ERRNO ,_("IPV6: disabled"));
+            MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO ,_("IPV6: disabled"));
             if (mhdst->ipv6) mhdst->ipv6 = 0;
         }
     #endif
@@ -1511,7 +1560,7 @@ static void webu_mhd_features_tls(struct mhdstart_ctx *mhdst){
         int retcd;
         retcd = MHD_is_feature_supported (MHD_FEATURE_SSL);
         if (retcd == MHD_YES){
-            MOTION_LOG(INF, TYPE_STREAM, NO_ERRNO ,_("SSL/TLS: available"));
+            MOTION_LOG(DBG, TYPE_STREAM, NO_ERRNO ,_("SSL/TLS: available"));
         } else {
             if ((mhdst->ctrl) && (mhdst->cnt[mhdst->indxthrd]->conf.webcontrol_tls)){
                 MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO ,_("SSL/TLS: disabled"));
@@ -1836,6 +1885,10 @@ static void webu_start_ctrl(struct context **cnt){
         free(mhdst.mhd_ops);
         if (cnt[0]->webcontrol_daemon == NULL){
             MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO ,_("Unable to start MHD"));
+        } else {
+            MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO
+                ,_("Started webcontrol on port %d")
+                ,cnt[0]->conf.webcontrol_port);
         }
     }
 
@@ -1843,6 +1896,32 @@ static void webu_start_ctrl(struct context **cnt){
     if (mhdst.tls_key  != NULL) free(mhdst.tls_key);
 
     return;
+}
+
+static void webu_strm_ntc(struct context **cnt, int indxthrd){
+    int indx;
+
+    if (indxthrd == 0 ){
+        if (cnt[1] != NULL) {
+            indx = 1;
+            while (cnt[indx] != NULL){
+                MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO
+                    ,_("Started camera %d stream on port/camera_id %d/%d")
+                    ,cnt[indx]->camera_id
+                    ,cnt[indxthrd]->conf.stream_port
+                    ,cnt[indx]->camera_id);
+                indx++;
+            }
+        } else {
+            MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO
+                ,_("Started camera %d stream on port %d")
+                ,cnt[indxthrd]->camera_id,cnt[indxthrd]->conf.stream_port);
+        }
+    } else {
+        MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO
+            ,_("Started camera %d stream on port %d")
+            ,cnt[indxthrd]->camera_id,cnt[indxthrd]->conf.stream_port);
+    }
 }
 
 static void webu_start_strm(struct context **cnt){
@@ -1905,6 +1984,8 @@ static void webu_start_strm(struct context **cnt){
                 MOTION_LOG(NTC, TYPE_STREAM, NO_ERRNO
                     ,_("Unable to start stream for camera %d")
                     ,cnt[mhdst.indxthrd]->camera_id);
+            } else {
+                webu_strm_ntc(cnt,mhdst.indxthrd);
             }
         }
         mhdst.indxthrd++;
@@ -1968,16 +2049,19 @@ void webu_stop(struct context **cnt) {
     int indxthrd;
 
     if (cnt[0]->webcontrol_daemon != NULL){
-        cnt[0]->webcontrol_finish = 1;
+        cnt[0]->webcontrol_finish = TRUE;
         MHD_stop_daemon (cnt[0]->webcontrol_daemon);
     }
+
 
     indxthrd = 0;
     while (cnt[indxthrd] != NULL){
         if (cnt[indxthrd]->webstream_daemon != NULL){
-            cnt[indxthrd]->webcontrol_finish = 1;
+            cnt[indxthrd]->webcontrol_finish = TRUE;
             MHD_stop_daemon (cnt[indxthrd]->webstream_daemon);
         }
+        cnt[indxthrd]->webstream_daemon = NULL;
+        cnt[indxthrd]->webcontrol_daemon = NULL;
         indxthrd++;
     }
 }
@@ -1988,6 +2072,7 @@ void webu_start(struct context **cnt) {
      * will not function correctly.
      */
     struct sigaction act;
+    int indxthrd;
 
     /* set signal handlers TO IGNORE */
     memset(&act, 0, sizeof(act));
@@ -1995,6 +2080,15 @@ void webu_start(struct context **cnt) {
     act.sa_handler = SIG_IGN;
     sigaction(SIGPIPE, &act, NULL);
     sigaction(SIGCHLD, &act, NULL);
+
+
+    indxthrd = 0;
+    while (cnt[indxthrd] != NULL){
+        cnt[indxthrd]->webstream_daemon = NULL;
+        cnt[indxthrd]->webcontrol_daemon = NULL;
+        cnt[indxthrd]->webcontrol_finish = FALSE;
+        indxthrd++;
+    }
 
     if (cnt[0]->conf.stream_preview_method != 99){
         webu_start_ports(cnt);

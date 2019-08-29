@@ -364,7 +364,7 @@ static void sig_handler(int signo)
         if (cnt_list) {
             i = -1;
             while (cnt_list[++i]) {
-                cnt_list[i]->webcontrol_finish = 1;
+                cnt_list[i]->webcontrol_finish = TRUE;
                 cnt_list[i]->event_stop = TRUE;
                 cnt_list[i]->finish = 1;
                 /*
@@ -1234,6 +1234,7 @@ static int motion_init(struct context *cnt)
     cnt->imgs.width_high = 0;
     cnt->imgs.height_high = 0;
     cnt->imgs.size_high = 0;
+    cnt->movie_passthrough = cnt->conf.movie_passthrough;
 
     MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO
         ,_("Camera %d started: motion detection %s"),
@@ -1245,9 +1246,9 @@ static int motion_init(struct context *cnt)
     if (init_camera_type(cnt) != 0 ) return -3;
 
     if ((cnt->camera_type != CAMERA_TYPE_RTSP) &&
-        (cnt->conf.movie_passthrough)) {
+        (cnt->movie_passthrough)) {
         MOTION_LOG(WRN, TYPE_ALL, NO_ERRNO,_("Pass-through processing disabled."));
-        cnt->conf.movie_passthrough = 0;
+        cnt->movie_passthrough = FALSE;
     }
 
     if ((cnt->conf.height == 0) || (cnt->conf.width == 0)) {
@@ -1306,13 +1307,18 @@ static int motion_init(struct context *cnt)
             ,cnt->imgs.width, cnt->imgs.height);
         return -3;
     }
-
     if ((cnt->imgs.width  < 64) || (cnt->imgs.height < 64)){
         MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
             ,_("Motion only supports width and height greater than or equal to 64 %dx%d")
             ,cnt->imgs.width, cnt->imgs.height);
             return -3;
     }
+    /* Substream size notification*/
+    if ((cnt->imgs.width % 16) || (cnt->imgs.height % 16)) {
+        MOTION_LOG(CRT, TYPE_NETCAM, NO_ERRNO
+            ,_("Substream not available.  Image sizes not modulo 16."));
+    }
+
 
     /* We set size_high here so that it can be used in the retry function to determine whether
      * we need to break and reallocate buffers
@@ -1327,6 +1333,7 @@ static int motion_init(struct context *cnt)
     /* contains the moving objects of ref. frame */
     cnt->imgs.ref_dyn = mymalloc(cnt->imgs.motionsize * sizeof(*cnt->imgs.ref_dyn));
     cnt->imgs.image_virgin.image_norm = mymalloc(cnt->imgs.size_norm);
+    cnt->imgs.image_vprvcy.image_norm = mymalloc(cnt->imgs.size_norm);
     cnt->imgs.smartmask = mymalloc(cnt->imgs.motionsize);
     cnt->imgs.smartmask_final = mymalloc(cnt->imgs.motionsize);
     cnt->imgs.smartmask_buffer = mymalloc(cnt->imgs.motionsize * sizeof(*cnt->imgs.smartmask_buffer));
@@ -1387,6 +1394,7 @@ static int motion_init(struct context *cnt)
             MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO, _("Error capturing first image"));
         }
     }
+    cnt->current_image = &cnt->imgs.image_ring[cnt->imgs.image_ring_in];
 
     /* create a reference frame */
     alg_update_reference_frame(cnt, RESET_REF_FRAME);
@@ -1624,6 +1632,9 @@ static void motion_cleanup(struct context *cnt) {
 
     free(cnt->imgs.image_virgin.image_norm);
     cnt->imgs.image_virgin.image_norm = NULL;
+
+    free(cnt->imgs.image_vprvcy.image_norm);
+    cnt->imgs.image_vprvcy.image_norm = NULL;
 
     free(cnt->imgs.labels);
     cnt->imgs.labels = NULL;
@@ -2048,6 +2059,8 @@ static int mlp_capture(struct context *cnt){
 
         mlp_mask_privacy(cnt);
 
+        memcpy(cnt->imgs.image_vprvcy.image_norm, cnt->current_image->image_norm, cnt->imgs.size_norm);
+
         /*
          * If the camera is a netcam we let the camera decide the pace.
          * Otherwise we will keep on adding duplicate frames.
@@ -2121,7 +2134,7 @@ static int mlp_capture(struct context *cnt){
 
         if (cnt->video_dev >= 0 &&
             cnt->missing_frame_counter < (MISSING_FRAMES_TIMEOUT * cnt->conf.framerate)) {
-            memcpy(cnt->current_image->image_norm, cnt->imgs.image_virgin.image_norm, cnt->imgs.size_norm);
+            memcpy(cnt->current_image->image_norm, cnt->imgs.image_vprvcy.image_norm, cnt->imgs.size_norm);
         } else {
             cnt->lost_connection = 1;
 
@@ -2185,9 +2198,9 @@ static void mlp_detection(struct context *cnt){
              * anyway
              */
             if (cnt->detecting_motion || cnt->conf.setup_mode)
-                cnt->current_image->diffs = alg_diff_standard(cnt, cnt->imgs.image_virgin.image_norm);
+                cnt->current_image->diffs = alg_diff_standard(cnt, cnt->imgs.image_vprvcy.image_norm);
             else
-                cnt->current_image->diffs = alg_diff(cnt, cnt->imgs.image_virgin.image_norm);
+                cnt->current_image->diffs = alg_diff(cnt, cnt->imgs.image_vprvcy.image_norm);
 
             /* Lightswitch feature - has light intensity changed?
              * This can happen due to change of light conditions or due to a sudden change of the camera
@@ -2290,7 +2303,7 @@ static void mlp_tuning(struct context *cnt){
      */
     if ((cnt->conf.noise_tune && cnt->shots == 0) &&
          (!cnt->detecting_motion && (cnt->current_image->diffs <= cnt->threshold)))
-        alg_noise_tune(cnt, cnt->imgs.image_virgin.image_norm);
+        alg_noise_tune(cnt, cnt->imgs.image_vprvcy.image_norm);
 
 
     /*
@@ -2468,6 +2481,11 @@ static void mlp_actions(struct context *cnt){
         }
 
         cnt->current_image->flags |= (IMAGE_TRIGGER | IMAGE_SAVE);
+        /* Mark all images in image_ring to be saved */
+        for (indx = 0; indx < cnt->imgs.image_ring_size; indx++){
+            cnt->imgs.image_ring[indx].flags |= IMAGE_SAVE;
+        }
+
         motion_detected(cnt, cnt->video_dev, cnt->current_image);
     } else if ((cnt->current_image->flags & IMAGE_MOTION) && (cnt->startup_frames == 0)) {
         /*
@@ -3134,6 +3152,65 @@ static void motion_camera_ids(void){
     }
 }
 
+static void motion_ntc(void){
+
+    #ifdef HAVE_V4L2
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("v4l2   : available"));
+    #else
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("v4l2   : not available"));
+    #endif
+
+    #ifdef HAVE_BKTR
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("bktr   : available"));
+    #else
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("bktr   : not available"));
+    #endif
+
+    #ifdef HAVE_WEBP
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("webp   : available"));
+    #else
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("webp   : not available"));
+    #endif
+
+    #ifdef HAVE_MMAL
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("mmal   : available"));
+    #else
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("mmal   : not available"));
+    #endif
+
+    #ifdef HAVE_FFMPEG
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("ffmpeg : available"));
+    #else
+        MOTION_LOG(DBG, TYPE_ALL, NO_ERRNO,_("ffmpeg : not available"));
+    #endif
+
+    #ifdef HAVE_MYSQL
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("mysql  : available"));
+    #else
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("mysql  : not available"));
+    #endif
+
+    #ifdef HAVE_SQLITE3
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("sqlite3: available"));
+    #else
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("sqlite3: not available"));
+    #endif
+
+    #ifdef HAVE_PGSQL
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("pgsql  : available"));
+    #else
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("pgsql  : not available"));
+    #endif
+
+    #ifdef HAVE_INTL
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("nls    : available"));
+    #else
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO,_("nls    : not available"));
+    #endif
+
+
+}
+
 
 /**
  * motion_startup
@@ -3226,6 +3303,8 @@ static void motion_startup(int daemonize, int argc, char *argv[])
 
     conf_output_parms(cnt_list);
 
+    motion_ntc();
+
     motion_camera_ids();
 
     initialize_chars();
@@ -3263,8 +3342,6 @@ static void motion_start_thread(struct context *cnt){
         snprintf(service,6,"%s",cnt->conf.netcam_url);
         MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO,_("Camera ID: %d Camera Name: %s Service: %s")
             ,cnt->camera_id, cnt->conf.camera_name,service);
-        MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO, _("Stream port %d"),
-            cnt->conf.stream_port);
     } else {
         MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO,_("Camera ID: %d Camera Name: %s Device: %s")
             ,cnt->camera_id, cnt->conf.camera_name,cnt->conf.video_device);
@@ -3372,6 +3449,8 @@ static void motion_watchdog(int indx){
      * Best to just not get into a watchdog situation...
      */
 
+    if (!cnt_list[indx]->running) return;
+
     cnt_list[indx]->watchdog--;
     if (cnt_list[indx]->watchdog == 0) {
         MOTION_LOG(ERR, TYPE_ALL, NO_ERRNO
@@ -3474,6 +3553,24 @@ static int motion_check_threadcount(void){
         if (cnt_list[indx]->running || cnt_list[indx]->restart)
             motion_threads_running++;
     }
+
+    /* If the web control/streams are in finish/shutdown, we
+     * do not want to count them.  They will be completely closed
+     * by the process outside of loop that is checking the counts
+     * of threads.  If the webcontrol is not in a finish / shutdown
+     * then we want to keep them in the tread count to allow user
+     * to restart the cameras and keep Motion running.
+     */
+    indx = 0;
+    while (cnt_list[indx] != NULL){
+        if ((cnt_list[indx]->webcontrol_finish == FALSE) &&
+            ((cnt_list[indx]->webcontrol_daemon != NULL) ||
+             (cnt_list[indx]->webstream_daemon != NULL))) {
+            motion_threads_running++;
+        }
+        indx++;
+    }
+
 
     if (((motion_threads_running == 0) && finish) ||
         ((motion_threads_running == 0) && (threads_running == 0))) {
@@ -4048,12 +4145,12 @@ void util_threadname_get(char *threadname){
 }
 int util_check_passthrough(struct context *cnt){
 #if (HAVE_FFMPEG && LIBAVFORMAT_VERSION_MAJOR < 55)
-    if (cnt->conf.movie_passthrough)
+    if (cnt->movie_passthrough)
         MOTION_LOG(INF, TYPE_NETCAM, NO_ERRNO
             ,_("FFMPEG version too old. Disabling pass-through processing."));
     return 0;
 #else
-    if (cnt->conf.movie_passthrough){
+    if (cnt->movie_passthrough){
         MOTION_LOG(INF, TYPE_NETCAM, NO_ERRNO
             ,_("pass-through is enabled but is still experimental."));
         return 1;

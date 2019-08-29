@@ -159,11 +159,13 @@ static void do_sql_query(char *sqlquery, struct context *cnt, int save_id)
 
     if (strlen(sqlquery) <= 0) {
         /* don't try to execute empty queries */
+        MOTION_LOG(WRN, TYPE_DB, NO_ERRNO, "Ignoring empty sql query");
         return;
     }
 
 #ifdef HAVE_MYSQL
     if (!strcmp(cnt->conf.database_type, "mysql")) {
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO, "Executing mysql query");
         if (mysql_query(cnt->database, sqlquery) != 0) {
             int error_code = mysql_errno(cnt->database);
 
@@ -209,6 +211,7 @@ static void do_sql_query(char *sqlquery, struct context *cnt, int save_id)
 
 #ifdef HAVE_PGSQL
     if (!strcmp(cnt->conf.database_type, "postgresql")) {
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO, "Executing postgresql query");
         PGresult *res;
 
         res = PQexec(cnt->database_pg, sqlquery);
@@ -250,6 +253,7 @@ static void do_sql_query(char *sqlquery, struct context *cnt, int save_id)
     if ((!strcmp(cnt->conf.database_type, "sqlite3")) && (cnt->conf.database_dbname)) {
         int res;
         char *errmsg = 0;
+        MOTION_LOG(DBG, TYPE_DB, NO_ERRNO, "Executing sqlite query");
         res = sqlite3_exec(cnt->database_sqlite3, sqlquery, NULL, 0, &errmsg);
         if (res != SQLITE_OK ) {
             MOTION_LOG(ERR, TYPE_DB, NO_ERRNO, _("SQLite error was %s"), errmsg);
@@ -423,8 +427,8 @@ static void event_stream_put(struct context *cnt,
                             ,(cnt->imgs.height / 2));
                     } else {
                         /* Substream was not multiple of 8 so send full image*/
-                        cnt->stream_norm.jpeg_size = put_picture_memory(cnt
-                            ,cnt->stream_norm.jpeg_data
+                        cnt->stream_sub.jpeg_size = put_picture_memory(cnt
+                            ,cnt->stream_sub.jpeg_data
                             ,cnt->imgs.size_norm
                             ,img_data->image_norm
                             ,cnt->conf.stream_quality
@@ -517,7 +521,11 @@ static void event_image_detect(struct context *cnt,
             imagepath = DEF_IMAGEPATH;
 
         mystrftime(cnt, filename, sizeof(filename), imagepath, currenttime_tv, NULL, 0);
-        snprintf(fullfilename, PATH_MAX, "%s/%s.%s", cnt->conf.target_dir, filename, imageext(cnt));
+        snprintf(fullfilename, PATH_MAX, "%.*s/%.*s.%s"
+            , (int)(PATH_MAX-2-strlen(filename)-strlen(imageext(cnt)))
+            , cnt->conf.target_dir
+            , (int)(PATH_MAX-2-strlen(cnt->conf.target_dir)-strlen(imageext(cnt)))
+            , filename, imageext(cnt));
 
         passthrough = util_check_passthrough(cnt);
         if ((cnt->imgs.size_high > 0) && (!passthrough)) {
@@ -554,9 +562,14 @@ static void event_imagem_detect(struct context *cnt,
         mystrftime(cnt, filename, sizeof(filename), imagepath, currenttime_tv, NULL, 0);
 
         /* motion images gets same name as normal images plus an appended 'm' */
-        snprintf(filenamem, PATH_MAX, "%sm", filename);
-        snprintf(fullfilenamem, PATH_MAX, "%s/%s.%s", cnt->conf.target_dir, filenamem, imageext(cnt));
-
+        snprintf(filenamem, PATH_MAX, "%.*sm"
+            , (int)(PATH_MAX-1-strlen(filename))
+            , filename);
+        snprintf(fullfilenamem, PATH_MAX, "%.*s/%.*s.%s"
+            , (int)(PATH_MAX-2-strlen(filenamem)-strlen(imageext(cnt)))
+            , cnt->conf.target_dir
+            , (int)(PATH_MAX-2-strlen(cnt->conf.target_dir)-strlen(imageext(cnt)))
+            , filenamem, imageext(cnt));
         put_picture(cnt, fullfilenamem, cnt->imgs.img_motion.image_norm, FTYPE_IMAGE_MOTION);
         event(cnt, EVENT_FILECREATE, NULL, fullfilenamem, (void *)FTYPE_IMAGE, currenttime_tv);
     }
@@ -589,16 +602,25 @@ static void event_image_snapshot(struct context *cnt,
             snappath = DEF_SNAPPATH;
 
         mystrftime(cnt, filepath, sizeof(filepath), snappath, currenttime_tv, NULL, 0);
-        snprintf(filename, PATH_MAX, "%s.%s", filepath, imageext(cnt));
-        snprintf(fullfilename, PATH_MAX, "%s/%s", cnt->conf.target_dir, filename);
+        snprintf(filename, PATH_MAX, "%.*s.%s"
+            , (int)(PATH_MAX-1-strlen(filepath)-strlen(imageext(cnt)))
+            , filepath, imageext(cnt));
+        snprintf(fullfilename, PATH_MAX, "%.*s/%.*s"
+            , (int)(PATH_MAX-1-strlen(filename))
+            , cnt->conf.target_dir
+            , (int)(PATH_MAX-1-strlen(cnt->conf.target_dir))
+            , filename);
         put_picture(cnt, fullfilename, img_data->image_norm, FTYPE_IMAGE_SNAPSHOT);
-        event(cnt, EVENT_FILECREATE, NULL, fullfilename, (void *)FTYPE_IMAGE, currenttime_tv);
+        event(cnt, EVENT_FILECREATE, NULL, fullfilename, (void *)FTYPE_IMAGE_SNAPSHOT, currenttime_tv);
 
         /*
          *  Update symbolic link *after* image has been written so that
          *  the link always points to a valid file.
          */
-        snprintf(linkpath, PATH_MAX, "%s/lastsnap.%s", cnt->conf.target_dir, imageext(cnt));
+        snprintf(linkpath, PATH_MAX, "%.*s/lastsnap.%s"
+            , (int)(PATH_MAX-strlen("/lastsnap.")-strlen(imageext(cnt)))
+            , cnt->conf.target_dir, imageext(cnt));
+
         remove(linkpath);
 
         if (symlink(filename, linkpath)) {
@@ -608,11 +630,17 @@ static void event_image_snapshot(struct context *cnt,
         }
     } else {
         mystrftime(cnt, filepath, sizeof(filepath), cnt->conf.snapshot_filename, currenttime_tv, NULL, 0);
-        snprintf(filename, PATH_MAX, "%s.%s", filepath, imageext(cnt));
-        snprintf(fullfilename, PATH_MAX, "%s/%s", cnt->conf.target_dir, filename);
+        snprintf(filename, PATH_MAX, "%.*s.%s"
+            , (int)(PATH_MAX-1-strlen(imageext(cnt)))
+            , filepath, imageext(cnt));
+        snprintf(fullfilename, PATH_MAX, "%.*s/%.*s"
+            , (int)(PATH_MAX-1-strlen(filename))
+            , cnt->conf.target_dir
+            , (int)(PATH_MAX-1-strlen(cnt->conf.target_dir))
+            , filename);
         remove(fullfilename);
         put_picture(cnt, fullfilename, img_data->image_norm, FTYPE_IMAGE_SNAPSHOT);
-        event(cnt, EVENT_FILECREATE, NULL, fullfilename, (void *)FTYPE_IMAGE, currenttime_tv);
+        event(cnt, EVENT_FILECREATE, NULL, fullfilename, (void *)FTYPE_IMAGE_SNAPSHOT, currenttime_tv);
     }
 
     cnt->snapshot = 0;
@@ -672,7 +700,7 @@ static void event_image_preview(struct context *cnt,
              * Save best preview-shot also when no movies are recorded or imagepath
              * is used. Filename has to be generated - nothing available to reuse!
              */
-            MOTION_LOG(NTC, TYPE_ALL, NO_ERRNO, "different filename or picture only!");
+
             /*
              * conf.picture_filename would normally be defined but if someone deleted it by
              * control interface it is better to revert to the default than fail.
@@ -683,7 +711,11 @@ static void event_image_preview(struct context *cnt,
                 imagepath = (char *)DEF_IMAGEPATH;
 
             mystrftime(cnt, filename, sizeof(filename), imagepath, &cnt->imgs.preview_image.timestamp_tv, NULL, 0);
-            snprintf(previewname, PATH_MAX, "%s/%s.%s", cnt->conf.target_dir, filename, imageext(cnt));
+            snprintf(previewname, PATH_MAX, "%.*s/%.*s.%s"
+                , (int)(PATH_MAX-2-strlen(filename)-strlen(imageext(cnt)))
+                , cnt->conf.target_dir
+                , (int)(PATH_MAX-2-strlen(cnt->conf.target_dir)-strlen(imageext(cnt)))
+                , filename, imageext(cnt));
 
             passthrough = util_check_passthrough(cnt);
             if ((cnt->imgs.size_high > 0) && (!passthrough)) {
@@ -767,7 +799,11 @@ static void event_create_extpipe(struct context *cnt,
         }
 
         mystrftime(cnt, stamp, sizeof(stamp), moviepath, currenttime_tv, NULL, 0);
-        snprintf(cnt->extpipefilename, PATH_MAX - 4, "%s/%s", cnt->conf.target_dir, stamp);
+        snprintf(cnt->extpipefilename, PATH_MAX - 4, "%.*s/%.*s"
+            , (int)(PATH_MAX-5-strlen(stamp))
+            , cnt->conf.target_dir
+            , (int)(PATH_MAX-5-strlen(cnt->conf.target_dir))
+            , stamp);
 
         if (access(cnt->conf.target_dir, W_OK)!= 0) {
             /* Permission denied */
@@ -794,13 +830,14 @@ static void event_create_extpipe(struct context *cnt,
             return ;
 
         mystrftime(cnt, stamp, sizeof(stamp), cnt->conf.movie_extpipe, currenttime_tv, cnt->extpipefilename, 0);
+        snprintf(cnt->extpipecmdline, PATH_MAX - 1, "%s", stamp);
 
-        MOTION_LOG(NTC, TYPE_EVENTS, NO_ERRNO, _("pipe: %s"), stamp);
+        MOTION_LOG(NTC, TYPE_EVENTS, NO_ERRNO, _("pipe: %s"), cnt->extpipecmdline);
 
         MOTION_LOG(NTC, TYPE_EVENTS, NO_ERRNO, "cnt->moviefps: %d", cnt->movie_fps);
 
         event(cnt, EVENT_FILECREATE, NULL, cnt->extpipefilename, (void *)FTYPE_MPEG, currenttime_tv);
-        cnt->extpipe = popen(stamp, "we");
+        cnt->extpipe = popen(cnt->extpipecmdline, "we");
 
         if (cnt->extpipe == NULL) {
             MOTION_LOG(ERR, TYPE_EVENTS, SHOW_ERRNO, _("popen failed"));
@@ -836,7 +873,7 @@ static void event_extpipe_put(struct context *cnt,
            }
         } else {
             MOTION_LOG(ERR, TYPE_EVENTS, NO_ERRNO
-                ,_("pipe %s not created or closed already "), cnt->conf.movie_extpipe);
+                ,_("pipe %s not created or closed already "), cnt->extpipecmdline);
         }
     }
 }
@@ -939,11 +976,27 @@ static void event_ffmpeg_newfile(struct context *cnt,
             codec = "msmpeg4";
             break;
         }
-        snprintf(cnt->motionfilename, PATH_MAX - 4, "%s/%s_%sm", cnt->conf.target_dir, codec, stamp);
-        snprintf(cnt->newfilename, PATH_MAX - 4, "%s/%s_%s", cnt->conf.target_dir, codec, stamp);
+        snprintf(cnt->motionfilename, PATH_MAX - 4, "%.*s/%s_%.*sm"
+            , (int)(PATH_MAX-7-strlen(stamp)-strlen(codec))
+            , cnt->conf.target_dir, codec
+            , (int)(PATH_MAX-7-strlen(cnt->conf.target_dir)-strlen(codec))
+            , stamp);
+        snprintf(cnt->newfilename, PATH_MAX - 4, "%.*s/%s_%.*s"
+            , (int)(PATH_MAX-6-strlen(stamp)-strlen(codec))
+            , cnt->conf.target_dir, codec
+            , (int)(PATH_MAX-6-strlen(cnt->conf.target_dir)-strlen(codec))
+            , stamp);
     } else {
-        snprintf(cnt->motionfilename, PATH_MAX - 4, "%s/%sm", cnt->conf.target_dir, stamp);
-        snprintf(cnt->newfilename, PATH_MAX - 4, "%s/%s", cnt->conf.target_dir, stamp);
+        snprintf(cnt->motionfilename, PATH_MAX - 4, "%.*s/%.*sm"
+            , (int)(PATH_MAX-6-strlen(stamp))
+            , cnt->conf.target_dir
+            , (int)(PATH_MAX-6-strlen(cnt->conf.target_dir))
+            , stamp);
+        snprintf(cnt->newfilename, PATH_MAX - 4, "%.*s/%.*s"
+            , (int)(PATH_MAX-5-strlen(stamp))
+            , cnt->conf.target_dir
+            , (int)(PATH_MAX-5-strlen(cnt->conf.target_dir))
+            , stamp);
     }
     if (cnt->conf.movie_output) {
         cnt->ffmpeg_output = mymalloc(sizeof(struct ffmpeg));
@@ -1052,7 +1105,11 @@ static void event_ffmpeg_timelapse(struct context *cnt,
         mystrftime(cnt, tmp, sizeof(tmp), timepath, currenttime_tv, NULL, 0);
 
         /* PATH_MAX - 4 to allow for .mpg to be appended without overflow */
-        snprintf(cnt->timelapsefilename, PATH_MAX - 4, "%s/%s", cnt->conf.target_dir, tmp);
+        snprintf(cnt->timelapsefilename, PATH_MAX - 4, "%.*s/%.*s"
+            , (int)(PATH_MAX-5-strlen(tmp))
+            , cnt->conf.target_dir
+            , (int)(PATH_MAX-5-strlen(cnt->conf.target_dir))
+            , tmp);
         passthrough = util_check_passthrough(cnt);
         cnt->ffmpeg_timelapse = mymalloc(sizeof(struct ffmpeg));
         if ((cnt->imgs.size_high > 0) && (!passthrough)){

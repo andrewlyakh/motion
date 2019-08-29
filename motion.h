@@ -53,7 +53,7 @@ struct image_data;
 #include <pthread.h>
 #include <microhttpd.h>
 
-#ifdef __FreeBSD__
+#if defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <pthread_np.h>
 #endif
 
@@ -301,6 +301,7 @@ struct images {
     struct image_data img_motion;     /* Picture buffer for motion images */
     int *ref_dyn;                     /* Dynamic objects to be excluded from reference frame */
     struct image_data image_virgin;   /* Last picture frame with no text or locate overlay */
+    struct image_data image_vprvcy;   /* Virgin image with the privacy mask applied */
     struct image_data preview_image;  /* Picture buffer for best image when enables */
     unsigned char *mask;              /* Buffer for the mask file */
     unsigned char *smartmask;
@@ -470,11 +471,13 @@ struct context {
     int movie_fps;
     char newfilename[PATH_MAX];
     char extpipefilename[PATH_MAX];
+    char extpipecmdline[PATH_MAX];
     int movie_last_shot;
 
-    struct ffmpeg *ffmpeg_output;
-    struct ffmpeg *ffmpeg_output_motion;
-    struct ffmpeg *ffmpeg_timelapse;
+    struct ffmpeg   *ffmpeg_output;
+    struct ffmpeg   *ffmpeg_output_motion;
+    struct ffmpeg   *ffmpeg_timelapse;
+    int             movie_passthrough;
 
     char timelapsefilename[PATH_MAX];
     char motionfilename[PATH_MAX];
